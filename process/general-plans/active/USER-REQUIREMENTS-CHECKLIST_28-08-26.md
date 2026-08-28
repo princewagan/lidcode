@@ -222,3 +222,29 @@ Legend: `[ ]` not started · `[~]` in progress · `[x]` done + verified
    (backup at `~/.warp-monitor.env.bak-20260829`).
 
 6. **Consider rotating the database password.** It was shared in plain chat.
+
+---
+
+## FINAL STATE (29 Aug 2026)
+
+- **Mac app**: `~/Desktop/LidCode.app`, running. 348 tests, 1 known pre-existing failure.
+- **Repo**: github.com/princewagan/lidcode — 8 commits on `main`.
+- **Website**: https://mytelevision.vercel.app/lidcode
+  (the old `television-pearl.vercel.app` alias is dead and no longer referenced anywhere).
+- **Database**: Supabase `qpdxbjquzzzrtnlbgmar` (ap-southeast-1), tables `warp_state` + `lidcode_state`.
+  Accessed by direct Postgres over the transaction pooler, since no service-role key exists for it.
+- **Verified live end to end**: the running Mac app pushes real state — correct hostname, lid, battery,
+  temperature, Claude usage, and three sessions with real sentence titles.
+- **Push diagnostics**: `~/Library/Logs/lidcode-push.log`. If the phone dashboard ever goes stale, that
+  file says why. It was added because a silent pusher and a working one looked identical.
+
+### Egress, since that is what killed the last database
+- Browser polling: 10s/20s -> 60s, stops entirely while the tab is hidden, and unchanged state returns a
+  ~40 byte 304 instead of a full body.
+- Mac pushes: were every 5 seconds (temperature drift changed the hash every tick). Now only held-awake,
+  lid, and session status changes push immediately; everything else rides a 60s heartbeat. Measured: 25
+  minutes of idle produced zero traffic.
+
+### Still needs real-world time
+A1/A2/A3/A5 — the sleep-at-the-deadline behaviour is fixed and unit-tested, but only a real multi-hour run
+with the lid shut proves it. Everything else above was verified directly.
