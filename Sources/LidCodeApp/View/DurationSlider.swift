@@ -3,37 +3,33 @@ import SwiftUI
 
 /// How long a hold runs, as a continuous track rather than a list of preset buttons.
 ///
-/// The presets it replaces were `30m / 3h / 8h` — three buttons that between them could
-/// not express "until I finish this build, about two hours". A menu of durations is the
-/// wrong shape for a quantity: it makes the common case (something between the presets)
-/// unreachable, and it makes the range itself invisible, so nobody could tell that 8h was
-/// the ceiling until they went looking for a fourth button.
+/// Snapped to 30 minutes, with a maximum of 6 hours (J6) so the intervals are well-spaced.
 ///
-/// Snapped to 30 minutes, and the snap is the whole reason this feels like a control
-/// rather than a slippery mess: a free slider over an 8-hour range puts ~28 seconds under
-/// every pixel, so you cannot land on a round number and the readout never stops changing.
+/// J3 fix — smooth drag: the previous implementation committed the drag value to the model
+/// on every `onChanged` call. The model persisted it and republished on the 5-second tick,
+/// which snapped the knob back mid-drag. The fix: a `@State dragFraction` owns the knob
+/// position during drag and the model is only updated on `onEnded`. Inbound model changes
+/// are ignored while `isDragging` is true.
 struct DurationSlider: View {
-    /// The committed value, in seconds.
+    /// The committed value, in seconds. Read from the model; updated only on drag end.
     var second: Int
-    /// Called on release only — never mid-drag.
-    ///
-    /// Each commit writes `setting.json` and re-arms the live hold, and the panel resizes
-    /// itself on every model change. Committing per frame meant ~60 disk writes and 60
-    /// window re-layouts per drag, which is what a smooth-looking slider fighting a
-    /// stuttering window looks like from the outside.
+    /// Called on release only — never mid-drag (J3: no per-frame disk writes or model updates).
     var onCommit: (Int) -> Void
 
     static let minimumSecond = 30 * 60
-    static let maximumSecond = 8 * 3600
+    /// Max is 6h (J6), down from 8h, so the 30-minute steps are more spaced.
+    static let maximumSecond = 6 * 3600
     static let stepSecond = 30 * 60
     static var stepCount: Int { (maximumSecond - minimumSecond) / stepSecond }
 
     /// Where the knob actually is while a drag is in flight, 0...1, unsnapped.
     ///
-    /// The knob tracks the pointer exactly and the *readout* snaps. Snapping the knob too
-    /// makes it lurch away from the cursor by up to half a step, which reads as the
-    /// control fighting you — the one thing a slider must never do.
+    /// J3: This local state owns the thumb position during drag. It is set on
+    /// `onChanged` and cleared on `onEnded`. While non-nil, inbound `second` changes
+    /// from the model are ignored — so the 5-second tick cannot snap the thumb back.
     @State private var dragFraction: Double?
+    /// True while a drag gesture is in flight, used to gate model-value reads.
+    @State private var isDragging = false
     /// The last step a tick was played for, so crossing a boundary fires exactly once.
     @State private var tickedStep: Int?
 
@@ -51,7 +47,9 @@ struct DurationSlider: View {
                 Spacer()
                 Text(Self.display(second: displayedSecond))
                     .font(.system(size: 12, weight: .semibold, design: .rounded).monospacedDigit())
-                    .foregroundStyle(dragFraction == nil ? .secondary : .primary)
+                    // Fixed width so the readout never causes the label row to reflow
+                    .frame(minWidth: 44, alignment: .trailing)
+                    .foregroundStyle(isDragging ? Color.primary : Color.secondary)
             }
 
             track
@@ -59,9 +57,12 @@ struct DurationSlider: View {
             HStack {
                 Text("30m").font(.system(size: 9)).foregroundStyle(.tertiary)
                 Spacer()
-                Text("8h").font(.system(size: 9)).foregroundStyle(.tertiary)
+                Text("6h").font(.system(size: 9)).foregroundStyle(.tertiary)
             }
         }
+        // Disable animations on the slider itself — the knob tracks the pointer directly
+        // and any SwiftUI animation layered on top fights the gesture recogniser.
+        .transaction { $0.animation = nil }
     }
 
     private var track: some View {
@@ -74,13 +75,7 @@ struct DurationSlider: View {
                 Capsule(style: .continuous)
                     .fill(Color.primary.opacity(0.07))
 
-                // Filled to the *centre* of the knob, not to its leading edge, so the fill
-                // and the knob agree about where the value is at both ends of the travel.
-                //
-                // Brand orange, deepening to the right. Blue-to-cyan was the last hue on
-                // the panel that meant nothing — the fill is not a severity, so it takes
-                // the family's normal colour and uses depth only to show direction of
-                // travel. See `Palette`.
+                // Filled to the centre of the knob.
                 Capsule(style: .continuous)
                     .fill(LinearGradient(
                         colors: [Palette.brand, Palette.brandDeep],
@@ -95,8 +90,6 @@ struct DurationSlider: View {
                     .frame(width: knobDiameter, height: knobDiameter)
                     .shadow(color: .black.opacity(0.28), radius: 2.5, y: 1)
                     .overlay(
-                        // Grip lines. Purely decorative, and the only reason the knob does
-                        // not read as a blank dot at this size.
                         HStack(spacing: 2) {
                             ForEach(0..<3, id: \.self) { _ in
                                 Capsule().fill(Color.black.opacity(0.22)).frame(width: 1.2, height: 8)
@@ -107,18 +100,20 @@ struct DurationSlider: View {
             }
             .frame(height: Self.trackHeight)
             .contentShape(Rectangle())
-            // `minimumDistance: 0` so a plain click anywhere on the track jumps there,
-            // which is what every native slider does and what people try first.
             .gesture(
                 DragGesture(minimumDistance: 0)
                     .onChanged { value in
                         let raw = (value.location.x - Self.knobInset - (knobDiameter / 2)) / travel
                         let clamped = min(1, max(0, raw))
+                        // J3: local drag state owns the thumb — model not touched here
+                        isDragging = true
                         dragFraction = clamped
                         tick(for: Self.step(forFraction: clamped))
                     }
                     .onEnded { _ in
+                        // J3: commit to model only on drag end
                         let committed = Self.second(forFraction: dragFraction ?? visualFraction)
+                        isDragging = false
                         dragFraction = nil
                         tickedStep = nil
                         if committed != second { onCommit(committed) }
@@ -129,8 +124,6 @@ struct DurationSlider: View {
     }
 
     private func tickRow(travel: CGFloat) -> some View {
-        // Every step is a dot, so the granularity is visible before you touch anything —
-        // you can see that it lands on halves rather than discovering it by dragging.
         ForEach(1..<Self.stepCount, id: \.self) { index in
             let fraction = Double(index) / Double(Self.stepCount)
             Circle()
@@ -143,7 +136,7 @@ struct DurationSlider: View {
     // MARK: - Value mapping
 
     /// Where the knob is drawn: the raw pointer position mid-drag, the committed value
-    /// otherwise.
+    /// otherwise. J3: while dragging, ignore inbound model updates (dragFraction wins).
     private var visualFraction: Double {
         dragFraction ?? Self.fraction(forSecond: second)
     }
@@ -169,8 +162,7 @@ struct DurationSlider: View {
         minimumSecond + (step(forFraction: fraction) * stepSecond)
     }
 
-    /// "30m", "2h", "4h 30m". No zero-padding and no bare "0m" — this is a duration you
-    /// chose, not a countdown, so it should read the way you would say it out loud.
+    /// "30m", "2h", "4h 30m". No zero-padding and no bare "0m".
     static func display(second: Int) -> String {
         let value = clamped(second)
         let hour = value / 3600
@@ -180,11 +172,6 @@ struct DurationSlider: View {
     }
 
     /// The trackpad's own detent click, borrowed.
-    ///
-    /// `.alignment` is the feedback macOS plays when a dragged object snaps to a guide,
-    /// which is exactly what is happening here — so the slider feels like the rest of the
-    /// system rather than like something with a custom buzz. Silently does nothing on
-    /// hardware without a Force Touch trackpad.
     private func tick(for step: Int) {
         guard tickedStep != step else { return }
         tickedStep = step

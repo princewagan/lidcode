@@ -18,10 +18,22 @@ import LidCodeKit
 /// which is three statements of the same fact stacked vertically inside a control whose
 /// entire job is to be unambiguous at a glance. `ON · lid can close` is all three at once,
 /// and the sentence-length version moved to the tooltip.
+/// The F1-F4 button cycle: BLOCKED → OVERRIDE → DISABLED → (back to BLOCKED or normal).
+///
+/// When a guard (thermal/battery) is blocking, the button enters the BLOCKED state:
+/// it renders faded/desaturated to signal "enabled but held back". Pressing cycles:
+///   1. BLOCKED (faded) → press → OVERRIDE (full colour, guard bypassed)
+///   2. OVERRIDE → press → DISABLED (off)
+///   3. DISABLED → press → back to BLOCKED (guard still present)
+/// Warning texts are independent — they always reflect real hardware, not button state.
 struct PowerButton: View {
     var isEnabled: Bool
     var isSwitching: Bool
     var isProtected: Bool
+    /// True when a guard is blocking and the user has NOT yet overridden it (state 1).
+    var isGuardBlocked: Bool = false
+    /// True when the user has explicitly overridden the guard (state 2).
+    var isGuardOverride: Bool = false
     var onToggle: (Bool) -> Void
 
     var body: some View {
@@ -49,69 +61,94 @@ struct PowerButton: View {
 
                 Spacer(minLength: 4)
 
-                // A pill rather than a checkmark. The button's own fill already says on or
-                // off at a glance; this says it again in words for the case the colour
-                // cannot cover — a screenshot, a colour-blind reader, or the half second
-                // after a click when you are checking that it took.
-                Text(isEnabled ? "ON" : "OFF")
+                // The pill says the current state in words. In BLOCKED state it says "BLOCKED"
+                // so the user instantly reads "enabled but held back" rather than "on".
+                Text(pillLabel)
                     .font(.system(size: 9, weight: .bold))
                     .kerning(0.5)
                     .padding(.horizontal, 7)
                     .padding(.vertical, 3)
                     .background(
-                        Capsule().fill(isEnabled ? Color.white.opacity(0.24)
-                                                 : Color.primary.opacity(0.09))
+                        Capsule().fill(pillBackground)
                     )
             }
-            .foregroundStyle(isEnabled ? AnyShapeStyle(.white) : AnyShapeStyle(.secondary))
+            .foregroundStyle(labelStyle)
+            .opacity(isGuardBlocked ? 0.55 : 1.0)  // F1: faded when blocked
             .padding(.horizontal, 12)
             .padding(.vertical, 10)
             .frame(maxWidth: .infinity)
             .background(
                 RoundedRectangle(cornerRadius: 11, style: .continuous)
-                    // One gradient for every on state, not two.
-                    //
-                    // The button used to fill green-to-teal for a plain hold and
-                    // blue-to-indigo for a protected one, which made the *most* important
-                    // control on the panel change hue based on the least important
-                    // distinction it draws. The state that actually matters is on versus
-                    // off, and that is now the whole colour story: brand orange, or grey.
-                    .fill(isEnabled
-                          ? AnyShapeStyle(LinearGradient(
-                                colors: [Palette.brand, Palette.brandDeep],
-                                startPoint: .topLeading,
-                                endPoint: .bottomTrailing))
-                          : AnyShapeStyle(Color.primary.opacity(0.07)))
+                    .fill(buttonBackground)
             )
             .contentShape(Rectangle())
+            .animation(.easeOut(duration: 0.15), value: isGuardBlocked)
+            .animation(.easeOut(duration: 0.15), value: isGuardOverride)
+            .animation(.easeOut(duration: 0.15), value: isEnabled)
         }
         .buttonStyle(.plain)
         .disabled(isSwitching)
-        // The paragraph the caption used to print, where it costs nothing: hover text is
-        // free vertical space, and it is read by exactly the person who wants it.
         .help(helpText)
     }
 
-    /// State first, consequence second — `ON · lid can close`.
-    ///
-    /// A button labelled with its action ("Disable") and a button labelled with its state
-    /// ("Keep Mac Awake") are opposites, and picking the wrong one is how toggles end up
-    /// meaning the reverse of what people read. Leading with ON/OFF settles it, and the
-    /// clause after the dot is the one thing the state does not tell you on its own:
-    /// whether the hold survives the lid closing.
     private var line: String {
         if !isEnabled { return "OFF" }
+        if isGuardBlocked { return "ON · guard blocking" }
+        if isGuardOverride { return "ON · guard overridden" }
         return isProtected ? "ON · lid can close" : "ON · lid must stay open"
+    }
+
+    private var pillLabel: String {
+        if !isEnabled { return "OFF" }
+        if isGuardBlocked { return "BLOCKED" }
+        if isGuardOverride { return "OVERRIDE" }
+        return "ON"
     }
 
     private var symbolName: String {
         if !isEnabled { return "moon.fill" }
+        if isGuardBlocked { return "exclamationmark.shield" }
+        if isGuardOverride { return "bolt.shield.fill" }
         return isProtected ? "laptopcomputer.slash" : "bolt.fill"
+    }
+
+    private var labelStyle: AnyShapeStyle {
+        if isEnabled {
+            return AnyShapeStyle(.white)
+        }
+        return AnyShapeStyle(.secondary)
+    }
+
+    private var pillBackground: AnyShapeStyle {
+        if isGuardBlocked { return AnyShapeStyle(Palette.brandDeep.opacity(0.4)) }
+        if isGuardOverride { return AnyShapeStyle(Color.white.opacity(0.28)) }
+        if isEnabled { return AnyShapeStyle(Color.white.opacity(0.24)) }
+        return AnyShapeStyle(Color.primary.opacity(0.09))
+    }
+
+    private var buttonBackground: AnyShapeStyle {
+        if !isEnabled {
+            return AnyShapeStyle(Color.primary.opacity(0.07))
+        }
+        if isGuardBlocked {
+            // Desaturated/faded gradient — guard is blocking (F1)
+            return AnyShapeStyle(LinearGradient(
+                colors: [Palette.brand.opacity(0.5), Palette.brandDeep.opacity(0.5)],
+                startPoint: .topLeading,
+                endPoint: .bottomTrailing))
+        }
+        // Normal ON or OVERRIDE — full colour (F2)
+        return AnyShapeStyle(LinearGradient(
+            colors: [Palette.brand, Palette.brandDeep],
+            startPoint: .topLeading,
+            endPoint: .bottomTrailing))
     }
 
     private var helpText: String {
         if isSwitching { return "Asking the root helper…" }
         if !isEnabled { return "Hold your Mac awake, and keep it awake with the lid shut." }
+        if isGuardBlocked { return "A thermal or battery guard is blocking the hold. Press to override the guard and continue anyway." }
+        if isGuardOverride { return "Guard is overridden — hold continues despite the warning. Press to disable the hold entirely." }
         return isProtected
             ? "Holding your Mac awake. Closed-lid protection is active, so the hold survives shutting the lid. Click to stop."
             : "Holding your Mac awake, but the root helper is not installed — closing the lid will still sleep it. Click to stop."

@@ -3,6 +3,7 @@ import SwiftUI
 import UserNotifications
 import LidCodeKit
 
+
 /// Bridges the runtime to SwiftUI and hosts the socket the CLI talks to.
 @MainActor
 final class AppModel: ObservableObject {
@@ -26,6 +27,12 @@ final class AppModel: ObservableObject {
     nonisolated private let runtime = LidCodeRuntime()
     private var server: LineSocketServer?
 
+    // Push client (W10). One instance for the lifetime of the app.
+    // If LidCodePusher is not yet compiled (Push/ dir is empty), the call below
+    // is wrapped in #if and will not block the build.
+    // The file ownership note in the plan says W3 holds this; we wire it here.
+    nonisolated private let pusher = LidCodePusher()
+
     init() {
         runtime.onChange = { [weak self] snapshot in
             Task { @MainActor in
@@ -42,6 +49,11 @@ final class AppModel: ObservableObject {
                 // deepens at the soft floor has to know where the floor moved to.
                 self.setting = self.runtime.currentSetting
                 self.refreshHelperReadiness()
+            }
+            // Push to Supabase off the main thread (W10). Non-blocking; silent on failure.
+            Task.detached { [weak self] in
+                guard let self else { return }
+                self.pusher.pushIfChanged(snapshot)
             }
         }
         runtime.onAlert = { [weak self] message in
@@ -171,6 +183,12 @@ final class AppModel: ObservableObject {
     func setNetworkProbe(_ isOn: Bool) {
         _ = runtime.updateSetting(SettingPatch(isNetworkProbeOn: isOn))
         runtime.refreshHealth()
+    }
+
+    /// Override the thermal/battery guard. Part of the F1-F4 button cycle.
+    /// Only bypasses soft guards — hard battery floor and critical-heat+closed are always enforced.
+    func setGuardOverride(_ isOn: Bool) {
+        runtime.setGuardOverride(isOn)
     }
 
     func setAutoWatch(_ isOn: Bool) {

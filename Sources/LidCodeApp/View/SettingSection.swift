@@ -48,22 +48,19 @@ struct SettingSection: View {
             .buttonStyle(.plain)
 
             if isExpanded {
-                DurationSlider(second: setting.holdSecond) { model.setHoldSecond($0) }
+                // Duration slider moved to main panel (J5). Only guards + floors here.
                 guardRow
                 Divider().opacity(0.5)
                 battery
                 Divider().opacity(0.5)
                 behaviour
+                Divider().opacity(0.5)
+                menuBarSection
             }
         }
     }
 
-    /// The one fact worth keeping on the collapsed row: how long a hold runs for.
-    ///
-    /// The summary used to read "60% · 5m idle" — two numbers nobody changes, printed
-    /// permanently. The duration is different: it is now the only setting in here that is
-    /// touched per run, and burying it behind a chevron with no trace would make it
-    /// genuinely hard to find. Two characters is not wordiness.
+    /// The one fact worth keeping on the collapsed row.
     private var summary: String {
         DurationSlider.display(second: setting.holdSecond)
     }
@@ -203,5 +200,54 @@ struct SettingSection: View {
                 .foregroundStyle(.secondary)
         }
         .help(help)
+    }
+
+    // MARK: - Menu bar visibility toggles (I1, I2)
+
+    /// Six toggles controlling which elements appear in the menu bar.
+    /// All default to enabled (I2). Each toggle hides its element only — it never
+    /// disables the underlying feature.
+    private var menuBarSection: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Text("MENU BAR ICONS".uppercased())
+                .font(.system(size: 9, weight: .semibold))
+                .foregroundStyle(.secondary)
+                .kerning(0.3)
+
+            Toggle("State icon (bolt / lid)", isOn: Binding(
+                get: { setting.menuBarShowStateIcon },
+                set: { model.updateSetting(SettingPatch(menuBarShowStateIcon: $0)) }
+            ))
+
+            Toggle("Active sessions badge", isOn: Binding(
+                get: { setting.menuBarShowActiveBadge },
+                set: { model.updateSetting(SettingPatch(menuBarShowActiveBadge: $0)) }
+            ))
+
+            Toggle("Blocked sessions badge", isOn: Binding(
+                get: { setting.menuBarShowBlockedBadge },
+                set: { model.updateSetting(SettingPatch(menuBarShowBlockedBadge: $0)) }
+            ))
+
+            Toggle("Error sessions badge", isOn: Binding(
+                get: { setting.menuBarShowErrorBadge },
+                set: { model.updateSetting(SettingPatch(menuBarShowErrorBadge: $0)) }
+            ))
+
+            Toggle("Temp warning icon", isOn: Binding(
+                get: { setting.menuBarShowTempWarnIcon },
+                set: { model.updateSetting(SettingPatch(menuBarShowTempWarnIcon: $0)) }
+            ))
+            .help("Orange thermometer when temp is high but not blocking.")
+
+            Toggle("Guard alert icon", isOn: Binding(
+                get: { setting.menuBarShowAlertIcon },
+                set: { model.updateSetting(SettingPatch(menuBarShowAlertIcon: $0)) }
+            ))
+            .help("Red thermometer or red battery when a guard is actively blocking the hold.")
+        }
+        .font(.system(size: 11))
+        .controlSize(.small)
+        .tint(Palette.brand)
     }
 }

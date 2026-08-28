@@ -67,23 +67,89 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // right-click path without patching the button's action.
         item.button?.sendAction(on: [.leftMouseUp, .rightMouseUp])
         statusItem = item
-        applyIcon(Icon(model.snapshot))
+        applyStatusBar(MenuBarContent(model.snapshot, setting: model.setting))
 
-        // Deduplicated: the runtime publishes every 5s, but the glyph changes rarely.
-        // Reassigning the image on every tick would redraw the menu bar for nothing.
+        // The composite icon changes whenever the snapshot or setting changes.
+        // `.removeDuplicates(by:)` still prevents redundant redraws.
         iconSink = model.$snapshot
-            .map(Icon.init)
-            .removeDuplicates()
-            .sink { icon in
-                DispatchQueue.main.async { [weak self] in self?.applyIcon(icon) }
+            .combineLatest(model.$setting)
+            .map { (snapshot, setting) in MenuBarContent(snapshot, setting: setting) }
+            .removeDuplicates(by: { $0 == $1 })
+            .sink { [weak self] content in
+                DispatchQueue.main.async { self?.applyStatusBar(content) }
             }
     }
 
-    func applyIcon(_ icon: Icon) {
-        statusItem?.button?.image = NSImage(
-            systemSymbolName: icon.symbolName,
-            accessibilityDescription: icon.label
-        )
+    /// Everything the menu bar draws, kept as one Equatable value so `removeDuplicates`
+    /// covers the whole picture rather than just the glyph.
+    struct MenuBarContent: Equatable {
+        var icon: Icon
+        var percentText: String?       // e.g. "14%" or nil
+        var activeBadge: Int?          // nil = hidden
+        var blockedBadge: Int?
+        var errorBadge: Int?
+        var warningKind: WarningKind?
+        // Settings for each element's visibility
+        var showStateIcon: Bool
+        var showActiveBadge: Bool
+        var showBlockedBadge: Bool
+        var showErrorBadge: Bool
+        var showTempWarnIcon: Bool
+        var showAlertIcon: Bool
+
+        enum WarningKind: Equatable {
+            case tempNonBlocking    // orange thermometer
+            case tempBlocking       // red thermometer
+            case batteryBlocking    // red battery
+        }
+
+        init(_ snapshot: RuntimeSnapshot, setting: Setting) {
+            icon = Icon(snapshot)
+
+            // Utilization percent (C5, C6)
+            if let usage = snapshot.usage {
+                let pct = Int(usage.fiveHour.utilization.rounded())
+                percentText = "\(pct)%"
+            } else {
+                percentText = nil
+            }
+
+            // Session count badges (C7-C10)
+            let sessions = snapshot.agentSession.sessions
+            let activeCount = sessions.filter { $0.status == .running }.count
+            let blockedCount = sessions.filter { $0.status == .blocked }.count
+            let errorCount = sessions.filter { $0.status == .error }.count
+
+            activeBadge = activeCount > 0 ? activeCount : nil
+            blockedBadge = blockedCount > 0 ? blockedCount : nil
+            errorBadge = errorCount > 0 ? errorCount : nil
+
+            // Warning slot (H1-H4) — exactly one slot
+            let thermal = snapshot.thermal
+            let isBlocked = snapshot.blockedBy != nil
+            if isBlocked {
+                // Determine whether blocked by thermal or battery
+                if case .thermalCritical = snapshot.blockedBy {
+                    warningKind = .tempBlocking
+                } else if case .batteryFloor = snapshot.blockedBy {
+                    warningKind = .batteryBlocking
+                } else {
+                    warningKind = .tempBlocking   // fallback
+                }
+            } else if thermal.level >= .serious {
+                warningKind = .tempNonBlocking
+            } else {
+                warningKind = nil
+            }
+
+            // Visibility toggles (I1, I2)
+            showStateIcon = setting.menuBarShowStateIcon
+            showActiveBadge = setting.menuBarShowActiveBadge
+            showBlockedBadge = setting.menuBarShowBlockedBadge
+            showErrorBadge = setting.menuBarShowErrorBadge
+            showTempWarnIcon = setting.menuBarShowTempWarnIcon
+            showAlertIcon = setting.menuBarShowAlertIcon
+        }
     }
 
     /// The glyph and the words for it, kept together so the menu bar is legible to
@@ -112,6 +178,151 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             self.symbolName = symbolName
             self.label = label
         }
+    }
+
+    /// Renders the composite menu bar image: state icon + percent text + count badges + warning icon.
+    ///
+    /// Rendering approach: compose a single NSImage that is `isTemplate = false`, so all
+    /// colours survive the menu bar's dark/light mode without being flattened to monochrome.
+    /// The state icon is drawn from an SF Symbol at a reduced size; text and circles are
+    /// drawn directly with AppKit APIs. All elements are crisp on Retina because the image
+    /// is created at 2× scale (scale = 2) and the status bar scales it down automatically.
+    func applyStatusBar(_ content: MenuBarContent) {
+        guard let button = statusItem?.button else { return }
+
+        // ── Layout constants ──────────────────────────────────────────────────────
+        let barH: CGFloat = 18           // status bar item height
+        let iconSize: CGFloat = 14       // SF Symbol point size
+        let badgeDiam: CGFloat = 14      // badge circle diameter
+        let pctFont = NSFont.monospacedDigitSystemFont(ofSize: 11, weight: .medium)
+        let gap: CGFloat = 3             // space between elements
+        let scale: CGFloat = 2           // Retina scale
+
+        // Determine which elements are visible
+        let showIcon = content.showStateIcon
+        let showPct = content.percentText != nil
+        let showActive = content.showActiveBadge && content.activeBadge != nil
+        let showBlocked = content.showBlockedBadge && content.blockedBadge != nil
+        let showError = content.showErrorBadge && content.errorBadge != nil
+        let warnKind: MenuBarContent.WarningKind?
+        if let w = content.warningKind {
+            let show = (w == .tempNonBlocking) ? content.showTempWarnIcon : content.showAlertIcon
+            warnKind = show ? w : nil
+        } else {
+            warnKind = nil
+        }
+
+        // ── Measure total width ───────────────────────────────────────────────────
+        var width: CGFloat = 4  // leading padding
+        if showIcon { width += iconSize + gap }
+        if showPct {
+            let pctStr = content.percentText!
+            let pctW = (pctStr as NSString).size(withAttributes: [.font: pctFont]).width
+            width += pctW + gap
+        }
+        if showActive { width += badgeDiam + gap }
+        if showBlocked { width += badgeDiam + gap }
+        if showError { width += badgeDiam + gap }
+        if warnKind != nil { width += iconSize + gap }
+        width += 2  // trailing padding
+        width = max(width, 16)
+
+        // ── Create NSImage ────────────────────────────────────────────────────────
+        let imgSize = NSSize(width: width, height: barH)
+        let img = NSImage(size: imgSize)
+        img.isTemplate = false   // keep colours — do not let menu bar flatten to monochrome
+
+        img.lockFocusFlipped(false)
+
+        var x: CGFloat = 4
+
+        // Helper: draw an SF Symbol tinted to a specific colour inside lockFocusFlipped.
+        // NSImage.draw(in:) does not consult the current AppKit fill/stroke colour, so
+        // the correct way to produce a coloured symbol is to use the symbol configuration
+        // API to pre-bake the tint, then draw the resulting image normally.
+        func drawSymbol(_ name: String, color: NSColor, rect: NSRect) {
+            let config = NSImage.SymbolConfiguration(paletteColors: [color])
+            if let raw = NSImage(systemSymbolName: name, accessibilityDescription: nil),
+               let tinted = raw.withSymbolConfiguration(config) {
+                tinted.draw(in: rect)
+            }
+        }
+
+        // State icon — adaptive foreground colour (white in dark menu bar, black in light).
+        // labelColor is the correct menu-bar foreground: black on light bar, white on dark.
+        if showIcon {
+            let iconRect = NSRect(x: x, y: (barH - iconSize) / 2, width: iconSize, height: iconSize)
+            drawSymbol(content.icon.symbolName, color: .labelColor, rect: iconRect)
+            x += iconSize + gap
+        }
+
+        // Percent text
+        if showPct, let pctStr = content.percentText {
+            let attrs: [NSAttributedString.Key: Any] = [
+                .font: pctFont,
+                .foregroundColor: NSColor.labelColor
+            ]
+            let size = (pctStr as NSString).size(withAttributes: attrs)
+            let y = (barH - size.height) / 2
+            (pctStr as NSString).draw(at: NSPoint(x: x, y: y), withAttributes: attrs)
+            x += size.width + gap
+        }
+
+        // Helper: draw a coloured circle badge with a number
+        func drawBadge(count: Int, color: NSColor) {
+            let badgeRect = NSRect(x: x, y: (barH - badgeDiam) / 2, width: badgeDiam, height: badgeDiam)
+            color.setFill()
+            NSBezierPath(ovalIn: badgeRect).fill()
+
+            let numStr = "\(count)"
+            let numFont = NSFont.systemFont(ofSize: count > 9 ? 8 : 9, weight: .bold)
+            let numAttrs: [NSAttributedString.Key: Any] = [
+                .font: numFont,
+                .foregroundColor: NSColor.white
+            ]
+            let numSize = (numStr as NSString).size(withAttributes: numAttrs)
+            let numPt = NSPoint(
+                x: badgeRect.midX - numSize.width / 2,
+                y: badgeRect.midY - numSize.height / 2
+            )
+            (numStr as NSString).draw(at: numPt, withAttributes: numAttrs)
+            x += badgeDiam + gap
+        }
+
+        // Active badge — blue
+        if showActive, let count = content.activeBadge {
+            drawBadge(count: count, color: NSColor.systemBlue)
+        }
+        // Blocked badge — yellow/orange
+        if showBlocked, let count = content.blockedBadge {
+            drawBadge(count: count, color: NSColor.systemOrange)
+        }
+        // Error badge — red
+        if showError, let count = content.errorBadge {
+            drawBadge(count: count, color: NSColor.systemRed)
+        }
+
+        // Warning icon — one slot only (H1-H4).
+        // Rendered in the specific warning colour using symbol configuration, not as a
+        // template, so the orange/red survives the menu bar's monochrome flatten.
+        if let warn = warnKind {
+            let (warnSymbol, warnColor): (String, NSColor) = {
+                switch warn {
+                case .tempNonBlocking: return ("thermometer.medium", NSColor.systemOrange)
+                case .tempBlocking:    return ("thermometer.medium", NSColor.systemRed)
+                case .batteryBlocking: return ("battery.25", NSColor.systemRed)
+                }
+            }()
+            let warnRect = NSRect(x: x, y: (barH - iconSize) / 2, width: iconSize, height: iconSize)
+            drawSymbol(warnSymbol, color: warnColor, rect: warnRect)
+            _ = scale  // Retina scale used when this image is composited into the bar
+        }
+
+        img.unlockFocus()
+
+        button.image = img
+        button.title = ""
+        button.imagePosition = .imageOnly
     }
 
     // MARK: - Panel
@@ -295,7 +506,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         // 2. Re-create the status item image. The menu bar can be rebuilt after a
         //    display event, and the icon needs to be re-stamped to remain visible.
-        applyIcon(Icon(model.snapshot))
+        applyStatusBar(MenuBarContent(model.snapshot, setting: model.setting))
 
         // 3. Force a health refresh so the panel reflects current state rather than
         //    pre-sleep readings. This also pokes the runtime's observable so the icon
