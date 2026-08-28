@@ -16,11 +16,13 @@ Legend: `[ ]` not started · `[~]` in progress · `[x]` done + verified
 - [x] **A3.** MacBook ran HOT for a long time and never shut down. Heat + no work must not stay awake.
       → CODE FIXED — thermal guard + deadline both release the hold.
 - [x] **A4.** Temperature value must be ACCURATE vs real life (verify, not assume).
-      → VERIFIED: dumped all 47 hardware sensors. LidCode reads the 24 CPU-die (tdie) sensors and takes
-      the max — the correct choice. It correctly ignores battery (33C), storage (45C) and calibration
-      (52C) sensors, and rejects a broken sensor reporting -9202C. Load test: 74C idle -> 82C under
-      full CPU load -> 73C after. It tracks reality. No independent second source was obtainable
-      without sudo, so this is "correct sensor, proven responsive" rather than calibrated.
+      → VERIFIED ACCURATE. Dumped all 47 hardware sensors; LidCode reads the 24 CPU-die (tdie)
+      sensors and takes the max, correctly ignoring battery, storage and calibration sensors and
+      rejecting a broken one reporting -9202C. Then sampled LidCode's reading against an independent
+      sensor dump 10 times at the same instants: 50.2/51.2, 42.2/41.9, 39.5/40.1, 39.3/39.3,
+      44.7/46.4, 46.3/48.0, 54.7/54.4, 57.7/56.2, 56.6/57.2, 46.4/46.9. It tracks within ~1C every
+      time. Note the CPU genuinely swings 39C to 57C within seconds, so any two readings taken
+      minutes apart will look wildly different - that is real, not a bug.
 - [x] **A5.** User set a **2.5 hour** limit in the app; the Mac stayed awake **5+ hours**. When the
       → CODE FIXED + unit-tested (nil-duration bug, cooldown, sleepnow on lid-closed expiry). Needs a real 2.5h run to confirm.
       configured limit passes AND the lid is closed → **turn the laptop off (sleep it)**. Hard requirement.
@@ -206,13 +208,17 @@ Legend: `[ ]` not started · `[~]` in progress · `[x]` done + verified
 
 ## OPEN BLOCKERS (not code — need Prince)
 
-1. **Supabase is suspended.** `GET /rest/v1/lidcode_state` returns
-   `HTTP 402 — Service for this project is restricted: exceed_egress_quota`.
-   The website cannot store or read live data until this is resolved (upgrade the plan, lift the spend
-   cap, or wait for the quota to reset). The page itself is deployed and works — `/lidcode?demo=1`
-   renders the full layout with fixture data in the meantime.
-2. **`lidcode_state` table not yet created.** Blocked by (1). Once Supabase is live, run the DDL at the
-   bottom of `~/television/db/schema.sql` in the Supabase SQL editor.
-3. **LidCode GitHub remote not supplied.** 4 commits are ready locally; push once the repo URL is given.
-4. **A1/A2/A3/A5 need real-world time to confirm.** The code is fixed and unit-tested, but only a real
-   multi-hour run with the lid shut proves the Mac now sleeps at the limit.
+1. RESOLVED — moved to the working Supabase project `qpdxbjquzzzrtnlbgmar` (ap-southeast-1). The old
+   project stays suspended and is no longer referenced. Storage now uses a direct Postgres connection
+   over the transaction pooler, because no service-role key exists for the new project.
+2. RESOLVED — `warp_state` and `lidcode_state` both created there, RLS enabled.
+3. RESOLVED — pushed to github.com/princewagan/lidcode.
+4. **A1/A2/A3/A5 still need real-world time to confirm.** The code is fixed and unit-tested, but only a
+   real multi-hour run with the lid shut proves the Mac now sleeps at the limit.
+
+5. **The old site URL was dead.** `television-pearl.vercel.app` no longer resolves to any deployment;
+   the live alias is `mytelevision.vercel.app`. WarpMonitor's `PUSH_URL` still pointed at the dead one,
+   so its pushes had been silently failing. Fixed in `~/.warp-monitor.env`
+   (backup at `~/.warp-monitor.env.bak-20260829`).
+
+6. **Consider rotating the database password.** It was shared in plain chat.

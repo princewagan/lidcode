@@ -91,7 +91,7 @@ public struct LidCodeSessionPayload: Codable, Sendable {
 
 // MARK: - LidCodePusher
 
-/// Pushes `RuntimeSnapshot` to `https://television-pearl.vercel.app/api/lidcode`
+/// Pushes `RuntimeSnapshot` to the television dashboard (see `resolvePushURL`)
 /// whenever the meaningful state changes, plus a heartbeat every 60 s.
 ///
 /// Design constraints (from the freeze-history of LidCode):
@@ -215,14 +215,39 @@ public final class LidCodePusher: @unchecked Sendable {
             return
         }
 
-        // Prefer PUSH_URL from env; fall back to the hard-coded default.
-        let urlString = parsed["PUSH_URL"] ?? "https://television-pearl.vercel.app/api/lidcode"
-        guard let url = URL(string: urlString) else {
-            fputs("[lidcode-pusher] Invalid PUSH_URL '\(urlString)' — pusher disabled.\n", stderr)
+        // PUSH_URL is WarpMonitor's endpoint (/api/push) and must not be used verbatim —
+        // posting a LidCode payload there would fail validation and could clobber warp_state.
+        // Prefer an explicit LIDCODE_PUSH_URL, else reuse PUSH_URL's host with our own path.
+        guard let url = Self.resolvePushURL(parsed) else {
+            fputs("[lidcode-pusher] No usable push URL — pusher disabled.\n", stderr)
             return
         }
 
         config = Config(pushURL: url, pushSecret: secret)
+    }
+
+    /// Path this pusher always posts to, regardless of which host it resolves.
+    static let lidcodePath = "/api/lidcode"
+
+    /// Used only when the env file names no host at all.
+    static let defaultPushURL = "https://mytelevision.vercel.app/api/lidcode"
+
+    /// Resolution order:
+    ///   1. `LIDCODE_PUSH_URL` — used verbatim.
+    ///   2. `PUSH_URL` — host reused, path forced to `/api/lidcode`.
+    ///   3. the built-in default.
+    static func resolvePushURL(_ env: [String: String]) -> URL? {
+        if let explicit = env["LIDCODE_PUSH_URL"], !explicit.isEmpty {
+            return URL(string: explicit)
+        }
+        if let shared = env["PUSH_URL"], !shared.isEmpty,
+           var parts = URLComponents(string: shared), parts.host != nil {
+            parts.path = lidcodePath
+            parts.query = nil
+            parts.fragment = nil
+            if let derived = parts.url { return derived }
+        }
+        return URL(string: defaultPushURL)
     }
 
     // MARK: - Public API

@@ -433,3 +433,39 @@ final class LidCodePusherTest: XCTestCase {
         }
     }
 }
+
+// MARK: - Push URL resolution
+
+final class LidCodePushURLTest: XCTestCase {
+
+    func testExplicitLidcodeUrlWins() {
+        let url = LidCodePusher.resolvePushURL([
+            "LIDCODE_PUSH_URL": "https://example.test/custom",
+            "PUSH_URL": "https://other.test/api/push",
+        ])
+        XCTAssertEqual(url?.absoluteString, "https://example.test/custom")
+    }
+
+    func testSharedPushUrlKeepsHostButNeverKeepsWarpMonitorPath() {
+        // Posting a LidCode payload to /api/push would fail validation and
+        // could clobber warp_state, so the path must always be rewritten.
+        let url = LidCodePusher.resolvePushURL(["PUSH_URL": "https://mytelevision.vercel.app/api/push"])
+        XCTAssertEqual(url?.absoluteString, "https://mytelevision.vercel.app/api/lidcode")
+    }
+
+    func testSharedPushUrlDropsQueryAndFragment() {
+        let url = LidCodePusher.resolvePushURL(["PUSH_URL": "https://host.test/api/push?token=x#frag"])
+        XCTAssertEqual(url?.absoluteString, "https://host.test/api/lidcode")
+    }
+
+    func testFallsBackToDefaultWhenNoHostIsNamed() {
+        XCTAssertEqual(LidCodePusher.resolvePushURL([:])?.absoluteString, LidCodePusher.defaultPushURL)
+        XCTAssertEqual(LidCodePusher.resolvePushURL(["PUSH_URL": ""])?.absoluteString, LidCodePusher.defaultPushURL)
+    }
+
+    func testDefaultTargetsTheLiveDeployment() {
+        XCTAssertFalse(LidCodePusher.defaultPushURL.contains("television-pearl"),
+                       "television-pearl.vercel.app is a dead alias")
+        XCTAssertTrue(LidCodePusher.defaultPushURL.hasSuffix(LidCodePusher.lidcodePath))
+    }
+}
