@@ -1,0 +1,1125 @@
+import Foundation
+
+/// The brain. Owns every piece of hold state and is the only thing allowed to decide
+/// that the Mac may sleep again.
+///
+/// Shape of the loop, once every `tickIntervalSecond`:
+///   read battery + thermal → ask the governor → apply the verdict → check the timer
+///   → in smart mode, check whether every lease has been gone long enough to release.
+///
+/// `@unchecked Sendable` states the invariant the whole class already runs on and
+/// that `AppModel` already depends on with its `nonisolated` handle: every mutable
+/// field is touched only from `queue`, and the two callbacks are set once at init
+/// before `start()`. The health sweep is the first path that makes the compiler ask
+/// — it awaits an actor and comes back on a different thread — but the rule it has
+/// to obey is the same one every other path here obeys.
+///
+/// # Why nothing the main thread calls touches `queue`
+///
+/// Every read the UI performs used to be `queue.sync`, and `setClamshell` did blocking
+/// socket I/O to a root daemon *inside* one. That is the freeze users reported: the
+/// menu bar icon stays drawn but stops responding. The mechanism is not subtle — if
+/// anything ever blocks this serial queue, the very next `queue.sync` from the main
+/// thread never returns, and AppKit has no way to draw a menu for a thread that is
+/// parked in `dispatch_sync`.
+///
+/// The structural answer is the lock-guarded cache below. `snapshot`, `currentSetting`,
+/// `currentPattern`, `activeLease` and `currentHealth` are reads of a mirror that the
+/// queue refreshes on every `publish()`. They are O(1), they take an uncontended lock
+/// held for a handful of instructions, and they *cannot* wait on the runtime queue —
+/// so a wedged queue now costs stale data instead of a dead app.
+///
+/// Timeouts (see `ShellCommand` and `UnixSocket`) are the second half of the same fix.
+/// They stop the queue wedging in the first place; the cache stops a wedge being fatal.
+/// Neither is sufficient alone: a deadline only shortens a hang, and a cache of a queue
+/// that never runs again is just a frozen picture — which is what `isStalled` exists to
+/// say out loud.
+///
+/// The rules for anything added here:
+///
+/// - Public API the **main thread** can reach: lock read, or `queue.async`. Never
+///   `queue.sync`, and never blocking I/O on the caller's thread.
+/// - Public API only the **CLI socket handler** reaches (`claim`/`renew`/`release`/
+///   `healthNow`): `queue.sync` is allowed, because that handler runs on its own
+///   per-connection queue and blocking it delays one command rather than the UI.
+/// - Anything already running **on** the queue must never call a `queue.sync` API.
+///   `dispatch_sync` onto the serial queue you are already on is an instant, permanent
+///   deadlock with no diagnostic. The two escape hatches are `onChange`, which is
+///   dispatched to the main queue, and `onAlert`, which is invoked synchronously — so
+///   an `onAlert` handler must not call back into a blocking runtime API.
+public final class LidCodeRuntime: @unchecked Sendable {
+    public static let tickIntervalSecond = 5
+    /// Health is checked far less often than state is published: the local half is
+    /// cheap but spawns `pmset`, and the remote half puts packets on the wire. Every
+    /// six ticks is frequent enough to catch a dropped network inside half a minute.
+    public static let healthEveryTick = 6
+
+    /// A tick this far behind schedule means the runtime queue is wedged, not busy.
+    /// Twelve times the tick interval — comfortably past any legitimate stall, including
+    /// a machine coming back from sleep.
+    public static let stallAfterSecond: TimeInterval = 60
+
+    private let queue = DispatchQueue(label: "com.lidcode.runtime")
+    private var timer: DispatchSourceTimer?
+
+    /// Deliberately a *different* queue from `queue`. A watchdog that runs on the thing
+    /// it is watching reports nothing at exactly the moment it matters.
+    private let watchdogQueue = DispatchQueue(label: "com.lidcode.runtime.watchdog")
+    private var watchdogTimer: DispatchSourceTimer?
+    /// Watchdog-owned, so a stall is announced once rather than every 15 seconds.
+    private var isStallReported = false
+
+    private let assertion = PowerAssertion()
+    private let registry = LeaseRegistry()
+    private let helper: HelperClient
+    private let log: ActivityLog
+    private var watcher: ProcessWatcher
+    private let history = MetricHistory()
+    private let networkPath = NetworkPathObserver()
+    /// `lazy` only because it needs `networkPath`, which is not available to a stored
+    /// initializer. Touched exclusively from `queue`.
+    private lazy var probe = HealthProbe(path: networkPath)
+    private var health: HealthReport?
+    private var isProbeRunning = false
+    private var isProbeQueued = false
+    /// Callers blocked on a fresh sweep. Drained on `queue` when one lands.
+    private var healthWaiter: [(HealthReport) -> Void] = []
+    private var tickCount = 0
+    private var lastHealthProblem: Set<String> = []
+    /// Checks already notified about, so a sustained outage alerts once rather than
+    /// every 30 seconds until it clears.
+    private var alertedProblem: Set<String> = []
+    private var isSocketBound = false
+
+    private var setting: Setting
+    private var governor: SafetyGovernor
+    /// Whether a mutated `Setting` is written back to `~/.lidcode/setting.json`.
+    ///
+    /// Only a test turns this off, and it exists because of a mistake worth recording:
+    /// the first version of the settings tests drove `updateSetting` against a real
+    /// runtime and quietly rewrote the developer's own settings file. A test that
+    /// mutates the machine it runs on is a test nobody can trust twice.
+    private var isPersistenceOn = true
+
+    private var isHeld = false
+    private var isClamshellActive = false
+    private var isAutoWatchOn = true
+    private var mode: HoldMode = .smart
+    private var startedAt: Date?
+    private var expiresAt: Date?
+    private var lastLeaseSeenAt: Date?
+    private var lastStopReason: StopReason?
+    private var lastWarning: String?
+    /// Set when the governor forces a stop, and held until conditions genuinely
+    /// recover. See `beginHoldLocked` for what this exists to prevent.
+    private var safetyLock: StopReason?
+    /// Set when the user turns the hold off by hand.
+    ///
+    /// Without it, "Keep awake" off is meaningless whenever auto-watch is on: the
+    /// watched processes are still running, so the next scan re-acquires within ten
+    /// seconds and the switch flips itself back on while you are looking at it. Off has
+    /// to stay off until *you* say otherwise.
+    private var isUserPaused = false
+    /// When the machine first reached `setting.thermalCeiling` and stayed there.
+    ///
+    /// The accumulator for the sustained-heat rule. It lives here rather than in
+    /// `SafetyGovernor` because the governor is a pure function — readings in, verdict
+    /// out — and a rule that depends on *elapsed* time needs somebody holding a clock.
+    /// Set on the first tick at or above the ceiling, cleared the moment the level
+    /// drops below it, so a machine that cools down starts the fifteen minutes over.
+    private var hotSince: Date?
+
+    /// Live agent activity and Claude's rate-limit windows, refreshed once per tick.
+    ///
+    /// Both readers are internally cached and cost ~0.05 ms on a cache hit, but both
+    /// touch the filesystem — so they are read here, on the queue, and never from the
+    /// main thread. The results ride out through the snapshot like everything else.
+    private let sessionReader: AgentSessionReader
+    private var session: SessionSnapshot = .empty
+    private var usage: ClaudeUsage?
+
+    // MARK: - The lock-guarded mirror
+    //
+    // Written only from `publish()` (which runs on `queue`) plus the two synchronous
+    // setting writes below, and read from any thread. See the class comment for why
+    // this exists rather than a `queue.sync` accessor.
+
+    private let cacheLock = NSLock()
+    private var cachedSnapshot = RuntimeSnapshot()
+    private var cachedSetting: Setting
+    private var cachedLease: [WorkLease] = []
+    private var cachedHealth: HealthReport?
+    /// When the last tick *completed*. The watchdog's only input, and the reason
+    /// `isStalled` is computed by the reader rather than stored: a queue that has
+    /// stopped running cannot set a flag saying it has stopped running.
+    private var cachedTickAt: Date?
+
+    /// Fired on every state change so the menu bar can redraw.
+    public var onChange: ((RuntimeSnapshot) -> Void)?
+    /// Fired for user-visible safety events. The app turns these into notifications.
+    public var onAlert: ((String) -> Void)?
+
+    /// Injected so the loop can be driven deterministically in a test. The safety
+    /// rules are the whole product, and "release, then let auto-watch re-acquire two
+    /// seconds later" was a bug that no amount of governor-level testing could catch —
+    /// it only exists in the interaction between the governor, the watcher and the
+    /// hold. Testing that requires being able to say what the battery is.
+    private let readBattery: () -> BatteryReading
+    private let readThermal: () -> ThermalReading
+
+    public init(
+        setting: Setting = .load(),
+        log: ActivityLog = ActivityLog(),
+        helper: HelperClient = HelperClient(),
+        battery: @escaping () -> BatteryReading = BatteryReader.read,
+        thermal: @escaping () -> ThermalReading = ThermalReader.read,
+        sessionReader: AgentSessionReader = AgentSessionReader()
+    ) {
+        let normalized = setting.normalized()
+        self.readBattery = battery
+        self.readThermal = thermal
+        self.setting = normalized
+        self.cachedSetting = normalized
+        self.governor = SafetyGovernor(setting: normalized)
+        self.log = log
+        self.helper = helper
+        self.sessionReader = sessionReader
+        self.watcher = ProcessWatcher(pattern: normalized.watchPattern)
+
+        self.watcher.onScan = { [weak self] label in
+            self?.queue.async { self?.applyScan(label) }
+        }
+        self.helper.onDisconnect = { [weak self] in
+            self?.queue.async { self?.handleHelperLoss() }
+        }
+        // Seeded before anything can read it, so the first `snapshot` from the app's
+        // `start()` returns real battery and thermal readings rather than the empty
+        // placeholder the panel would otherwise draw for a whole tick.
+        self.cachedSnapshot = makeSnapshot()
+    }
+
+    // MARK: - Lifecycle
+
+    public func start() {
+        networkPath.start()
+        startWatchdog()
+        queue.async { [weak self] in
+            guard let self, self.timer == nil else { return }
+            let source = DispatchSource.makeTimerSource(queue: self.queue)
+            source.schedule(deadline: .now(), repeating: .seconds(Self.tickIntervalSecond))
+            source.setEventHandler { [weak self] in self?.tick() }
+            self.timer = source
+            source.resume()
+            if self.isAutoWatchOn { self.watcher.start() }
+        }
+    }
+
+    /// Called on quit. Everything this tool turns on must be turned back off here.
+    ///
+    /// The one remaining main-thread `queue.sync`, and it stays: quit has to finish the
+    /// revert before the process exits, and an async teardown races `exit()`. It is
+    /// bounded now — every call inside it has a deadline — and the worst case is a
+    /// couple of seconds on the way out rather than a live app that stops responding.
+    public func shutdown() {
+        networkPath.stop()
+        stopWatchdog()
+        queue.sync {
+            timer?.cancel(); timer = nil
+            watcher.stop()
+            if isClamshellActive { setClamshellLocked(false) }
+            if isHeld { stopLocked(reason: .appQuit) }
+            helper.disconnect()
+        }
+    }
+
+    // MARK: - Watchdog
+
+    /// Makes a wedge visible instead of silent.
+    ///
+    /// Runs on its own queue so it keeps reporting when the runtime queue is the thing
+    /// that has stopped. It does not attempt a recovery: there is no safe way to break
+    /// a serial queue out of a blocked syscall, and a watchdog that lies about having
+    /// fixed something is worse than one that only tells the truth.
+    private func startWatchdog() {
+        watchdogQueue.async { [weak self] in
+            guard let self, self.watchdogTimer == nil else { return }
+            let source = DispatchSource.makeTimerSource(queue: self.watchdogQueue)
+            source.schedule(deadline: .now() + .seconds(15), repeating: .seconds(15))
+            source.setEventHandler { [weak self] in self?.checkForStall() }
+            self.watchdogTimer = source
+            source.resume()
+        }
+    }
+
+    private func stopWatchdog() {
+        watchdogQueue.sync {
+            watchdogTimer?.cancel()
+            watchdogTimer = nil
+        }
+    }
+
+    private func checkForStall() {
+        let stalled = isStalled
+        guard stalled != isStallReported else { return }
+        isStallReported = stalled
+        if stalled {
+            let since = lastTickAt.map { Int(Date().timeIntervalSince($0)) } ?? 0
+            log.append(LogEntry(
+                kind: .note,
+                detail: "runtime stalled: no tick for \(since)s. The menu bar will stop updating"))
+        } else {
+            log.append(LogEntry(kind: .note, detail: "runtime recovered, ticking again"))
+        }
+    }
+
+    /// When the last tick finished. nil before the first one.
+    public var lastTickAt: Date? {
+        cacheLock.lock()
+        defer { cacheLock.unlock() }
+        return cachedTickAt
+    }
+
+    /// The runtime queue has not completed a tick in `stallAfterSecond`.
+    ///
+    /// Computed on read, from a timestamp, precisely so it can be true while the queue
+    /// that would otherwise have to set it is the thing that is stuck.
+    public var isStalled: Bool {
+        cacheLock.lock()
+        let at = cachedTickAt
+        cacheLock.unlock()
+        guard let at else { return false }
+        return Date().timeIntervalSince(at) > Self.stallAfterSecond
+    }
+
+    // MARK: - Commands
+
+    public func beginHold(second: Int?, mode: HoldMode) {
+        queue.async { [weak self] in self?.beginHoldLocked(second: second, mode: mode) }
+    }
+
+    public func endHold(reason: StopReason = .userStopped) {
+        queue.async { [weak self] in self?.stopLocked(reason: reason) }
+    }
+
+    /// Turning closed-lid on implies a hold — there is no useful state where the lid
+    /// is allowed to stay open but nothing is keeping the machine awake.
+    ///
+    /// Non-blocking, and that is the entire point of the signature. This used to be
+    /// `throws` over a `queue.sync`, and inside that sync it called `helper.connect()`
+    /// and `helper.setClamshell()` — blocking BSD socket I/O to a root daemon, on the
+    /// main thread, with no deadline. A helper that was installed but wedged froze the
+    /// app on the way *in* to closed-lid mode, which is exactly when a user is watching.
+    ///
+    /// - Parameter completion: delivered on the main queue, always, on both paths — so
+    ///   a caller can drive UI state from it without a hop of its own.
+    public func setClamshell(
+        _ isOn: Bool,
+        second: Int?,
+        mode: HoldMode,
+        completion: ((Result<Void, Error>) -> Void)? = nil
+    ) {
+        queue.async { [weak self] in
+            guard let self else { return }
+            let result = Result { try self.applyClamshellLocked(isOn, second: second, mode: mode) }
+            guard let completion else { return }
+            DispatchQueue.main.async { completion(result) }
+        }
+    }
+
+    /// Blocking form, for the CLI socket handler only.
+    ///
+    /// **Must not be called from the main thread.** It waits on the runtime queue and,
+    /// through it, on the root helper. The CLI's per-connection queue is the one caller
+    /// that can afford that — `lidcode lid on` has to be able to print the failure, and
+    /// a command that returns "ok" before the helper has agreed is a lie a script will
+    /// act on.
+    public func setClamshellBlocking(_ isOn: Bool, second: Int?, mode: HoldMode) throws {
+        try queue.sync { try applyClamshellLocked(isOn, second: second, mode: mode) }
+    }
+
+    private func applyClamshellLocked(_ isOn: Bool, second: Int?, mode: HoldMode) throws {
+        guard isOn else {
+            setClamshellLocked(false)
+            return
+        }
+        guard helper.isAvailable else { throw LidCodeError.helperMissing }
+        try helper.connect()
+        beginHoldLocked(second: second, mode: mode)
+        try setClamshellLockedThrowing(true)
+    }
+
+    /// The app tells the runtime whether the CLI socket actually bound. Losing that
+    /// bind is silent otherwise: every `lidcode` command reports "LidCode is not running"
+    /// while the app sits there running perfectly well.
+    public func setSocketBound(_ isBound: Bool, detail: String? = nil) {
+        queue.async { [weak self] in
+            guard let self else { return }
+            self.isSocketBound = isBound
+            if !isBound {
+                self.log.append(LogEntry(
+                    kind: .note, detail: "CLI socket not bound\(detail.map { ": \($0)" } ?? "")"))
+            }
+            // Re-check straight away rather than leaving the first sweep's answer up
+            // for half a minute — that sweep ran before the socket existed.
+            self.refreshHealthLocked(battery: readBattery(), thermal: readThermal())
+            self.publish()
+        }
+    }
+
+    // MARK: - Safety guards
+
+    /// The two always-visible guard toggles that replaced the timed override.
+    ///
+    /// The old override was bounded because an unbounded waiver is a disabled rule
+    /// nobody remembers switching off. These are unbounded — and that is fine for a
+    /// different reason: they are *persistent state the user can see*, drawn as two
+    /// buttons that say which way they are pointing, rather than a banner that appears
+    /// once and is gone by the time it matters. A rule you can see is off is not a rule
+    /// you forgot about.
+    ///
+    /// What has not changed is the line they cannot cross. Turning the battery guard
+    /// off waives the soft floor only; the hard floor still forces a resumable sleep.
+    /// Turning the thermal guard off waives the ceiling only; critical heat behind a
+    /// shut lid still forces sleep. See `SafetyGovernor.evaluate`.
+    public func setBatteryGuard(_ isOn: Bool) {
+        setGuard(isBattery: true, isOn: isOn)
+    }
+
+    public func setThermalGuard(_ isOn: Bool) {
+        setGuard(isBattery: false, isOn: isOn)
+    }
+
+    private func setGuard(isBattery: Bool, isOn: Bool) {
+        // Written to the mirror synchronously so a toggle the user just pressed reads
+        // back immediately, and applied on the queue where the governor lives.
+        cacheLock.lock()
+        if isBattery { cachedSetting.isBatteryGuardOn = isOn } else { cachedSetting.isThermalGuardOn = isOn }
+        cacheLock.unlock()
+
+        queue.async { [weak self] in
+            guard let self else { return }
+            if isBattery { self.setting.isBatteryGuardOn = isOn } else { self.setting.isThermalGuardOn = isOn }
+            self.governor = SafetyGovernor(setting: self.setting)
+            self.persistLocked()
+            let name = isBattery ? "battery" : "temperature"
+            self.log.append(LogEntry(
+                kind: isOn ? .note : .safetyWarned,
+                detail: isOn ? "\(name) guard on" : "\(name) guard off, overriding",
+                batteryPercent: self.readBattery().percent,
+                thermal: self.readThermal().level))
+            // Turning a guard *off* has to actually unblock the thing it was blocking,
+            // or the button is decoration: the lock engaged by that rule is still set,
+            // and nothing automatic is allowed to re-acquire while it is.
+            if !isOn, self.safetyLock != nil {
+                self.beginHoldLocked(second: nil, mode: .smart, isUserInitiated: true)
+            } else {
+                self.publish()
+            }
+        }
+    }
+
+    public func setAutoWatch(_ isOn: Bool) {
+        queue.async { [weak self] in
+            guard let self else { return }
+            self.isAutoWatchOn = isOn
+            if isOn {
+                self.watcher.start()
+            } else {
+                self.watcher.stop()
+                self.registry.replaceProcessLease([])
+            }
+            self.publish()
+        }
+    }
+
+    public func addPattern(_ pattern: String) {
+        queue.async { [weak self] in
+            guard let self, !pattern.isEmpty else { return }
+            guard !self.setting.watchPattern.contains(pattern) else { return }
+            self.setting.watchPattern.append(pattern)
+            self.watcher.pattern = self.setting.watchPattern
+            self.persistLocked()
+            self.publish()
+        }
+    }
+
+    public func removePattern(_ pattern: String) {
+        queue.async { [weak self] in
+            guard let self else { return }
+            self.setting.watchPattern.removeAll { $0 == pattern }
+            self.watcher.pattern = self.setting.watchPattern
+            self.persistLocked()
+            self.publish()
+        }
+    }
+
+    public var currentPattern: [String] {
+        cacheLock.lock()
+        defer { cacheLock.unlock() }
+        return cachedSetting.watchPattern
+    }
+
+    public var currentSetting: Setting {
+        cacheLock.lock()
+        defer { cacheLock.unlock() }
+        return cachedSetting
+    }
+
+    /// Applied to the live governor immediately, not just on next launch — a floor
+    /// you just raised should protect the run you are in the middle of.
+    ///
+    /// Returns the new value computed from the mirror and applies it asynchronously.
+    /// The return is therefore a prediction rather than a receipt, which is the right
+    /// trade for a settings write: the alternative was a `queue.sync` on the main
+    /// thread every time somebody dragged a slider.
+    ///
+    /// The queue re-applies the patch to *its* copy rather than assigning the value
+    /// computed here, so a concurrent `addPattern` cannot be clobbered by a slider
+    /// drag that started before it. The mirror is corrected by the `publish()` at the
+    /// end, which always writes the queue's version of the truth.
+    @discardableResult
+    public func updateSetting(_ patch: SettingPatch) -> Setting {
+        cacheLock.lock()
+        let predicted = patch.applied(to: cachedSetting)
+        cachedSetting = predicted
+        cacheLock.unlock()
+
+        queue.async { [weak self] in
+            guard let self else { return }
+            self.setting = patch.applied(to: self.setting)
+            self.governor = SafetyGovernor(setting: self.setting)
+            self.watcher.pattern = self.setting.watchPattern
+            self.persistLocked()
+            self.log.append(LogEntry(kind: .note, detail: "setting updated"))
+            self.publish()
+        }
+        return predicted
+    }
+
+    // MARK: - Lease (the agent-awareness path)
+    //
+    // These four keep `queue.sync`, and that is a deliberate exception rather than an
+    // oversight. They are reached only from the CLI socket handler, which runs on its
+    // own per-connection queue: blocking it delays one `lidcode` command, not the menu
+    // bar. They also have to be synchronous — `claim` returns the token the caller then
+    // renews with, and inventing one before the registry has agreed would hand out a
+    // token for a lease that does not exist.
+    //
+    // Audited for re-entrancy: none of them reaches a `queue.sync` API from inside the
+    // block. `beginHoldLocked` and `publish` are queue-confined internals, `onChange`
+    // is dispatched to the main queue, and `LeaseRegistry` carries its own lock.
+
+    /// An explicit declaration of live work. Preferred over process matching: the
+    /// agent itself knows whether it is mid-task, and a TTL means a crashed claimer
+    /// stops holding the Mac on its own without anything having to notice it died.
+    public func claim(label: String, ttlSecond: Int, key: String? = nil) -> String {
+        queue.sync {
+            let isNew: Bool
+            if let key {
+                let token = LeaseRegistry.token(forKey: key)
+                isNew = !registry.active.contains { $0.token == token }
+            } else {
+                isNew = true
+            }
+            let lease = registry.claim(label: label, ttlSecond: ttlSecond, key: key)
+            // A per-turn hook re-claims constantly; logging every renewal would bury
+            // the entries that explain why a run stopped.
+            if isNew {
+                log.append(LogEntry(kind: .leaseAdded, detail: "claim \(label) ttl \(ttlSecond)s"))
+            }
+            // A claim is somebody asking out loud, so it lifts a manual pause — a script
+            // that says "I am working now" should be honoured, and the alternative is a
+            // pause you set last Tuesday silently costing you an overnight run. It does
+            // *not* lift a safety lock: the battery does not care who asked.
+            isUserPaused = false
+
+            // The lease is recorded either way — the work is real and the panel should
+            // say so — but a claim does not override a safety stop. Otherwise an agent
+            // hook firing every turn walks straight through the battery floor.
+            if !isHeld && safetyLock == nil {
+                beginHoldLocked(second: nil, mode: .smart, isUserInitiated: false)
+            }
+            lastLeaseSeenAt = Date()
+            publish()
+            return lease.token
+        }
+    }
+
+    public func release(key: String) -> Bool {
+        release(token: LeaseRegistry.token(forKey: key))
+    }
+
+    public func renew(token: String, ttlSecond: Int) -> Bool {
+        queue.sync {
+            let renewed = registry.renew(token: token, ttlSecond: ttlSecond)
+            if renewed { lastLeaseSeenAt = Date() }
+            return renewed
+        }
+    }
+
+    public func release(token: String) -> Bool {
+        queue.sync {
+            let released = registry.release(token: token)
+            if released {
+                log.append(LogEntry(kind: .leaseRemoved, detail: token))
+                publish()
+            }
+            return released
+        }
+    }
+
+    /// From the mirror, not from `LeaseRegistry` — the registry itself stays
+    /// queue-confined, and `WorkLease` is a value type, so a copy taken under the lock
+    /// is a complete answer. Expiry pruning happens on the queue, so a lease can look
+    /// alive here for at most one tick past its TTL; `isExpired` is on the struct for
+    /// any caller that cares about the difference.
+    public var activeLease: [WorkLease] {
+        cacheLock.lock()
+        defer { cacheLock.unlock() }
+        return cachedLease
+    }
+
+    public func recentLog(limit: Int) -> [LogEntry] { log.recent(limit: limit) }
+
+    /// A lock read of the mirror, refreshed by `publish()`. Never touches the runtime
+    /// queue — see the class comment.
+    public var snapshot: RuntimeSnapshot {
+        cacheLock.lock()
+        var copy = cachedSnapshot
+        let at = cachedTickAt
+        cacheLock.unlock()
+        // Stamped by the reader, not the writer: the flag has to be able to become true
+        // while the queue that would set it is the thing that has stopped.
+        copy.isStalled = at.map { Date().timeIntervalSince($0) > Self.stallAfterSecond } ?? false
+        return copy
+    }
+
+    /// Read straight from `MetricHistory`, which carries its own lock. This was a
+    /// `queue.sync` from the main thread on every redraw.
+    public func recentSample(limit: Int) -> [MetricSample] { history.recent(limit: limit) }
+
+    // MARK: - Health
+
+    /// Force a sweep now — the menu's Refresh button. Returns immediately; the result
+    /// arrives through `onChange` like every other state update, so the UI redraws
+    /// itself rather than waiting on the network.
+    ///
+    /// - Parameter completion: invoked **on the runtime queue**, not the main one. It
+    ///   must not call back into a blocking runtime API. Every state read is a lock
+    ///   read now so the old instant-deadlock is gone, but `setClamshellBlocking` and
+    ///   the lease calls would still deadlock outright from in here.
+    public func refreshHealth(completion: ((HealthReport) -> Void)? = nil) {
+        queue.async { [weak self] in
+            guard let self else { return }
+            if let completion { self.healthWaiter.append(completion) }
+            self.refreshHealthLocked(battery: readBattery(), thermal: readThermal())
+        }
+    }
+
+    public var currentHealth: HealthReport? {
+        cacheLock.lock()
+        defer { cacheLock.unlock() }
+        return cachedHealth
+    }
+
+    /// Blocking variant for `lidcode health`.
+    ///
+    /// The CLI is synchronous and one-shot: returning the *previous* sweep means
+    /// `lidcode set --network-probe off && lidcode health` prints a sweep that still
+    /// probed the network, which reads as the setting having been ignored. A command
+    /// that says "here is the state" has to have looked.
+    ///
+    /// Must not be called from `queue`. The socket handler it serves runs on its own
+    /// connection queue, which is exactly why that handler is not main-actor bound.
+    public func healthNow(timeoutSecond: Int = 10) -> HealthReport? {
+        let semaphore = DispatchSemaphore(value: 0)
+        let box = ReportBox()
+        refreshHealth { report in
+            box.value = report
+            semaphore.signal()
+        }
+        // On timeout, fall back to the last completed sweep rather than printing
+        // nothing — a stale answer labelled with its own timestamp still beats silence.
+        _ = semaphore.wait(timeout: .now() + .seconds(timeoutSecond))
+        return box.value ?? currentHealth
+    }
+
+    private func refreshHealthLocked(battery: BatteryReading, thermal: ThermalReading) {
+        // One sweep at a time — the remote half can take seconds on a bad network, and
+        // stacking sweeps would put a growing pile of HEAD requests on the wire. A
+        // request that arrives mid-sweep is remembered rather than dropped: dropping it
+        // makes the menu's Refresh button do nothing, and leaves the first sweep's
+        // startup-transient answers on screen (the app binds its CLI socket just after
+        // the runtime's first tick, so that sweep always reports it as missing).
+        guard !isProbeRunning else { isProbeQueued = true; return }
+        isProbeRunning = true
+        isProbeQueued = false
+
+        let context = HealthContext(
+            isAwakeHeld: isHeld,
+            isAssertionActive: assertion.isActive,
+            isClamshellActive: isClamshellActive,
+            isSocketBound: isSocketBound,
+            isHelperConnected: helper.isConnected,
+            helperVersion: helper.lastKnownVersion,
+            activeLease: registry.active.map(\.label),
+            battery: battery,
+            thermal: thermal,
+            setting: setting
+        )
+
+        let probe = self.probe
+        Task { [weak self] in
+            let report = await probe.run(context: context)
+            self?.queue.async {
+                guard let self else { return }
+                self.isProbeRunning = false
+                self.health = report
+                let waiter = self.healthWaiter
+                self.healthWaiter.removeAll()
+                waiter.forEach { $0(report) }
+                self.announce(report)
+                self.publish()
+                if self.isProbeQueued {
+                    self.refreshHealthLocked(
+                        battery: self.readBattery(), thermal: self.readThermal())
+                }
+            }
+        }
+    }
+
+    /// Notify once per confirmed failure, and only while something is actually being
+    /// protected. A red row on an idle Mac is information; a red row at 3am during an
+    /// eight-hour run is the reason this panel exists.
+    ///
+    /// A check must be down on **two consecutive sweeps** before it is worth a
+    /// notification — the same two-strikes rule the network probe applies to itself,
+    /// extended to alerting so it also covers the local checks. Without it, every
+    /// launch fired "CLI socket — not bound": the first sweep runs from the runtime's
+    /// own first tick, which happens before the app has bound the socket, so the alarm
+    /// was true for about a second and wrong by the time anyone read it.
+    private func announce(_ report: HealthReport) {
+        let broken = Set(report.check.filter { $0.state == .down }.map(\.id))
+        let confirmed = broken.intersection(lastHealthProblem)
+        defer {
+            lastHealthProblem = broken
+            // Forget anything that recovered, so a future failure can alert again.
+            alertedProblem.formIntersection(broken)
+        }
+        guard isHeld || isClamshellActive else { return }
+
+        for check in report.check
+        where confirmed.contains(check.id) && !alertedProblem.contains(check.id) {
+            alertedProblem.insert(check.id)
+            log.append(LogEntry(kind: .safetyWarned, detail: "health: \(check.label): \(check.detail)"))
+            onAlert?("\(check.label): \(check.detail)")
+        }
+    }
+
+    // MARK: - Internals (all queue-confined)
+
+    /// Stop re-arming until the machine recovers.
+    private func engageSafetyLockLocked(_ reason: StopReason) {
+        guard safetyLock == nil else { return }
+        safetyLock = reason
+        log.append(LogEntry(kind: .safetyWarned, detail: "holding back: \(reason.summary)", reason: reason))
+    }
+
+    private func clearSafetyLockLocked() {
+        guard let reason = safetyLock else { return }
+        safetyLock = nil
+        log.append(LogEntry(kind: .note, detail: "recovered from \(reason.summary), holds allowed again"))
+        publish()
+    }
+
+    /// - Parameter isUserInitiated: a hold the user asked for by hand clears the lock
+    ///   and is always attempted — the governor still gets the next word a few seconds
+    ///   later, so an unsafe override stops again immediately and says why, once,
+    ///   instead of looping. An *automatic* hold is refused outright when the governor
+    ///   would only undo it, which also covers the cold-start case the lock alone
+    ///   misses: at 15% on battery with nothing yet held, there is no lock to consult,
+    ///   and the first claim would otherwise acquire an assertion for one tick.
+    private func beginHoldLocked(second: Int?, mode: HoldMode, isUserInitiated: Bool = true) {
+        if isUserInitiated {
+            clearSafetyLockLocked()
+            isUserPaused = false
+        } else {
+            let verdict = governor.evaluate(
+                battery: readBattery(), thermal: readThermal(),
+                isClamshellActive: isClamshellActive, hotForSecond: hotForSecond())
+            if let reason = verdict.reason {
+                engageSafetyLockLocked(reason)
+                publish()
+                return
+            }
+        }
+        self.mode = mode
+        if let second {
+            expiresAt = Date().addingTimeInterval(TimeInterval(min(second, Setting.maxSessionSecond)))
+        } else {
+            expiresAt = nil
+        }
+
+        guard !isHeld else { publish(); return }
+
+        guard assertion.acquire(reason: "LidCode is protecting a running job") else {
+            log.append(LogEntry(kind: .note, detail: "could not create power assertion"))
+            // Published even though nothing was acquired: the mode and expiry above did
+            // change, and every state read is a mirror of what `publish` writes now, so
+            // a mutation that skips it is a mutation the menu bar will never see.
+            publish()
+            return
+        }
+        isHeld = true
+        startedAt = Date()
+        lastLeaseSeenAt = Date()
+        lastStopReason = nil
+        log.append(LogEntry(
+            kind: .holdStarted,
+            detail: "mode \(mode.rawValue)" + (second.map { ", timer \($0)s" } ?? ", no timer"),
+            batteryPercent: readBattery().percent,
+            thermal: readThermal().level
+        ))
+        publish()
+    }
+
+    private func stopLocked(reason: StopReason) {
+        // Only a hand-made stop pauses. A timer running out or work finishing is the
+        // system doing its job, and the next real workload should hold normally.
+        if reason == .userStopped { isUserPaused = true }
+        if isClamshellActive { setClamshellLocked(false) }
+        // Stopping something that was not running still set `isUserPaused` above, and
+        // that is the whole point of the flag — so it has to reach the mirror.
+        guard isHeld else { publish(); return }
+
+        assertion.release()
+        isHeld = false
+        let heldSecond = startedAt.map { Int(Date().timeIntervalSince($0)) } ?? 0
+        startedAt = nil
+        expiresAt = nil
+        lastStopReason = reason
+        registry.releaseAll()
+
+        log.append(LogEntry(
+            kind: .holdStopped,
+            detail: "\(reason.summary) after \(heldSecond)s",
+            reason: reason,
+            batteryPercent: readBattery().percent,
+            thermal: readThermal().level
+        ))
+        publish()
+    }
+
+    private func setClamshellLockedThrowing(_ isOn: Bool) throws {
+        try helper.setClamshell(isOn: isOn)
+        isClamshellActive = isOn
+        log.append(LogEntry(kind: isOn ? .clamshellOn : .clamshellOff, detail: "disablesleep \(isOn ? 1 : 0)"))
+        publish()
+    }
+
+    private func setClamshellLocked(_ isOn: Bool) {
+        do {
+            try setClamshellLockedThrowing(isOn)
+        } catch {
+            // Failing to turn it *off* is the dangerous direction. The helper's deadman
+            // switch is the backstop: dropping the connection makes it revert anyway.
+            if !isOn {
+                helper.disconnect()
+                isClamshellActive = false
+                log.append(LogEntry(kind: .helperReverted, detail: "revert delegated to helper deadman switch"))
+            }
+            onAlert?("Closed-lid toggle failed: \(error.localizedDescription)")
+        }
+    }
+
+    private func handleHelperLoss() {
+        guard isClamshellActive else { return }
+        isClamshellActive = false
+        log.append(LogEntry(kind: .helperReverted, detail: "helper connection lost", reason: .heartbeatLost))
+        onAlert?("Lost the LidCode helper. Closed-lid protection is off, so open the lid before moving your Mac.")
+        publish()
+    }
+
+    private func applyScan(_ label: [String]) {
+        registry.replaceProcessLease(label)
+        if !label.isEmpty {
+            lastLeaseSeenAt = Date()
+            // `safetyLock` is the whole reason this condition is not just `!isHeld`.
+            // The watched processes are still running *because* the governor released
+            // the Mac rather than killing anything, so without the lock this line
+            // re-acquires the hold ~10s after every safety stop, the next tick stops it
+            // again, and the floor becomes a 10-second flap that never actually lets the
+            // Mac sleep — while re-notifying the user on every cycle.
+            if !isHeld && isAutoWatchOn && safetyLock == nil && !isUserPaused {
+                beginHoldLocked(second: nil, mode: .smart, isUserInitiated: false)
+            }
+        }
+        publish()
+    }
+
+    private func tick() {
+        // Stamped first, not last. The watchdog is asking "did the queue get here?",
+        // and stamping on the way out would call every slow-but-progressing tick a
+        // stall — and, worse, would never stamp at all on the paths that return early.
+        markTick()
+
+        let battery = readBattery()
+        let thermal = readThermal()
+
+        // Both readers are internally cached against file mtime, so this is a `stat`
+        // and a dictionary filter on the overwhelming majority of ticks. It still has
+        // to happen here rather than in the view: they touch the filesystem, and the
+        // main thread is not allowed to.
+        session = sessionReader.read()
+        usage = ClaudeUsageReader.read()
+
+        // The sustained-heat clock. Started on the first tick at or above the ceiling
+        // and cleared the moment the machine drops below it, so cooling down resets the
+        // window rather than banking progress toward a stop.
+        if thermal.level >= setting.thermalCeiling {
+            if hotSince == nil { hotSince = Date() }
+        } else {
+            hotSince = nil
+        }
+
+        // Sampled and probed before the safety guard below, not after: an idle Mac is
+        // exactly when you want to look at the panel and see that the network and the
+        // helper are fine *before* kicking off an overnight run.
+        history.append(MetricSample(
+            at: Date(),
+            leaseCount: registry.active.count,
+            batteryPercent: battery.percent,
+            thermalRank: thermal.level.rank,
+            isHeld: isHeld
+        ))
+
+        tickCount += 1
+        if tickCount % Self.healthEveryTick == 1 {
+            refreshHealthLocked(battery: battery, thermal: thermal)
+        }
+
+        // Lock maintenance runs *before* the guard below, because a lock is held while
+        // nothing is held — that is the point of it. Checked here, it lifts on its own
+        // as soon as the machine recovers.
+        if safetyLock != nil {
+            let verdict = governor.evaluate(
+                battery: battery, thermal: thermal, isClamshellActive: isClamshellActive,
+                hotForSecond: hotForSecond())
+            // Cleared only on `.proceed`, never on `.warn`, and that is where the
+            // hysteresis comes from: the governor already warns until the battery is
+            // 10 points clear of the floor, so a release at 25% does not re-arm until
+            // 35% or mains power. Clearing on `.warn` would re-acquire at 26% and drop
+            // again at 25% — the same flap in slower motion.
+            if verdict == .proceed { clearSafetyLockLocked() }
+        }
+
+        // Safety runs whenever the lid is held shut, even with no hold of our own —
+        // a stale disablesleep is exactly the state that needs a floor watching it.
+        //
+        // The idle path publishes rather than returning silently. It used to just
+        // return, which meant an idle Mac never refreshed the battery, thermal or
+        // session rows in the menu — the panel sat on whatever the last held tick said
+        // until something happened. Now that the snapshot is a mirror rather than a
+        // live read, that would have been a genuinely stale UI rather than merely a
+        // late one.
+        guard isHeld || isClamshellActive else { publish(); return }
+
+        switch governor.evaluate(
+            battery: battery,
+            thermal: thermal,
+            isClamshellActive: isClamshellActive,
+            hotForSecond: hotForSecond()
+        ) {
+        case .forceSleep(let reason):
+            engageSafetyLockLocked(reason)
+            log.append(LogEntry(
+                kind: .safetyWarned,
+                detail: "forcing sleep: \(reason.summary)",
+                reason: reason,
+                batteryPercent: battery.percent,
+                thermal: thermal.level
+            ))
+            onAlert?("Sleeping your Mac: \(reason.summary)")
+            stopLocked(reason: reason)
+            try? helper.sleepNow(reason: reason.summary)
+            return
+
+        case .release(let reason):
+            engageSafetyLockLocked(reason)
+            onAlert?("Releasing your Mac: \(reason.summary)")
+            stopLocked(reason: reason)
+            return
+
+        case .warn(let message):
+            if message != lastWarning {
+                lastWarning = message
+                log.append(LogEntry(kind: .safetyWarned, detail: message,
+                                    batteryPercent: battery.percent, thermal: thermal.level))
+                onAlert?(message)
+            }
+
+        case .proceed:
+            lastWarning = nil
+        }
+
+        if let expiresAt, Date() >= expiresAt {
+            stopLocked(reason: .timerExpired)
+            return
+        }
+
+        // Smart mode: release once every lease has been gone for the idle window.
+        if mode == .smart {
+            if registry.isEmpty {
+                let idleSince = lastLeaseSeenAt ?? startedAt ?? Date()
+                if Date().timeIntervalSince(idleSince) >= TimeInterval(setting.idleReleaseSecond) {
+                    stopLocked(reason: .workFinished)
+                    return
+                }
+            } else {
+                lastLeaseSeenAt = Date()
+            }
+        }
+
+        publish()
+    }
+
+    // MARK: - Test seams
+
+    /// Run one loop iteration synchronously, instead of waiting out the 5s timer.
+    func tickForTest() { queue.sync { tick() } }
+
+    /// Deliver a process scan as the watcher would, without a real `ps`.
+    func applyScanForTest(_ label: [String]) { queue.sync { applyScan(label) } }
+
+    /// Stop this runtime writing to `~/.lidcode/setting.json`.
+    ///
+    /// Every test that touches the settings path must call this first. Without it the
+    /// suite rewrites the settings of whoever ran it, which is both a broken test and a
+    /// small betrayal of the person running it.
+    func disablePersistenceForTest() { queue.sync { isPersistenceOn = false } }
+
+    /// Wait for everything already queued to finish.
+    ///
+    /// Tests used to spell this `_ = runtime.snapshot`, which happened to work because
+    /// `snapshot` was a `queue.sync`. It is a lock read now — that is the entire freeze
+    /// fix — so a test that needs the queue to have caught up has to ask for it.
+    func drainForTest() { queue.sync {} }
+
+    /// Move the sustained-heat clock back, so the fifteen-minute rule can be tested in
+    /// milliseconds. There is no other way in: the accumulator is wall-clock by design,
+    /// because the thing it measures is wall-clock.
+    func backdateHotSinceForTest(bySecond: Int) {
+        queue.sync {
+            guard let hotSince else { return }
+            self.hotSince = hotSince.addingTimeInterval(-TimeInterval(bySecond))
+        }
+    }
+
+    /// Age the watchdog stamp, so the stall path can be exercised without waiting a
+    /// minute for it.
+    func backdateTickForTest(bySecond: TimeInterval) {
+        cacheLock.lock()
+        cachedTickAt = cachedTickAt?.addingTimeInterval(-bySecond)
+        cacheLock.unlock()
+    }
+
+    /// Occupy the runtime queue for real, which is the only way to test the property
+    /// that matters: that a blocked queue does not block a reader. Simulating it with a
+    /// flag would test the mock rather than the code.
+    ///
+    /// `started` fires once the block is genuinely running, so the caller does not race
+    /// its own setup.
+    func blockQueueForTest(second: TimeInterval, started: @escaping () -> Void) {
+        queue.async {
+            started()
+            Thread.sleep(forTimeInterval: second)
+        }
+    }
+
+    /// The one place a `Setting` reaches the disk. Queue-confined, like every mutation
+    /// that leads to it.
+    private func persistLocked() {
+        guard isPersistenceOn else { return }
+        try? setting.save()
+    }
+
+    /// How long the machine has been continuously at or above the thermal ceiling.
+    /// Zero when it is below it, which is what the governor reads as "not sustained".
+    private func hotForSecond() -> Int {
+        guard let hotSince else { return 0 }
+        return max(0, Int(Date().timeIntervalSince(hotSince)))
+    }
+
+    private func makeSnapshot() -> RuntimeSnapshot {
+        RuntimeSnapshot(
+            isAwakeHeld: isHeld,
+            isAssertionActive: assertion.isActive,
+            isClamshellActive: isClamshellActive,
+            mode: mode,
+            startedAt: startedAt,
+            expiresAt: expiresAt,
+            activeLease: registry.active.map(\.display),
+            battery: readBattery(),
+            thermal: readThermal(),
+            lastStopReason: lastStopReason,
+            health: health,
+            blockedBy: safetyLock,
+            isAutoWatchOn: isAutoWatchOn,
+            isUserPaused: isUserPaused,
+            session: session,
+            usage: usage,
+            hotSinceSecond: hotSince == nil ? nil : hotForSecond(),
+            // Stamped by the reader in `snapshot`, never here. A value written on the
+            // queue could only ever say "not stalled", because a stalled queue is by
+            // definition not running this line.
+            isStalled: false
+        )
+    }
+
+    /// The single point where the mirror is refreshed and the UI is told to redraw.
+    ///
+    /// Must only be called from `queue` — it reads queue-confined state. Everything
+    /// public that returns state reads what this writes, so a path that mutates without
+    /// publishing is a path whose change the menu bar will not see.
+    private func publish() {
+        let snapshot = makeSnapshot()
+        let lease = registry.active
+        let setting = self.setting
+        let health = self.health
+
+        cacheLock.lock()
+        cachedSnapshot = snapshot
+        cachedLease = lease
+        cachedSetting = setting
+        cachedHealth = health
+        cacheLock.unlock()
+
+        DispatchQueue.main.async { [onChange] in onChange?(snapshot) }
+    }
+
+    private func markTick() {
+        cacheLock.lock()
+        cachedTickAt = Date()
+        cacheLock.unlock()
+    }
+}
+
+/// Carries a sweep across the semaphore in `healthNow`. A plain captured `var` cannot
+/// be mutated from an escaping closure under strict-concurrency checking.
+private final class ReportBox: @unchecked Sendable {
+    var value: HealthReport?
+}
+
+public enum LidCodeError: LocalizedError {
+    case helperMissing
+    case appNotRunning
+
+    public var errorDescription: String? {
+        switch self {
+        case .helperMissing:
+            return "The LidCode helper is not installed. Run Script/install-helper.sh first."
+        case .appNotRunning:
+            return "LidCode is not running. Open LidCode.app, or use `lidcode -- <command>`."
+        }
+    }
+}
