@@ -124,11 +124,66 @@ public final class LidCodePusher: @unchecked Sendable {
         qos: .utility
     )
 
+    /// Where push activity is recorded.
+    ///
+    /// stderr is invisible when the app is launched by LaunchServices (double-click
+    /// or `open`), which is how it normally runs — so a push failure in real use
+    /// left no trace anywhere. This file is the only way to tell a working pusher
+    /// from a silent one.
+    public static let logPath = NSHomeDirectory() + "/Library/Logs/lidcode-push.log"
+
+    /// Reused, because building an ISO8601DateFormatter per log line drags in ICU
+    /// locale setup every time — expensive, and on the launch path it showed up
+    /// prominently in a crash trace.
+    private static let logStamp = ISO8601DateFormatter()
+
+    public static func log(_ message: String) {
+        let line = "[\(logStamp.string(from: Date()))] \(message)\n"
+        // NB: this writes to stderr directly and must never call back into log().
+        line.withCString { _ = fputs($0, stderr) }
+        guard let data = line.data(using: .utf8) else { return }
+        let url = URL(fileURLWithPath: logPath)
+        try? FileManager.default.createDirectory(
+            at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
+        if let handle = try? FileHandle(forWritingTo: url) {
+            defer { try? handle.close() }
+            // Keep the file small; this runs for the lifetime of the app.
+            if (try? handle.seekToEnd()).map({ $0 > 256 * 1024 }) == true {
+                try? handle.truncate(atOffset: 0)
+                try? handle.seek(toOffset: 0)
+            }
+            try? handle.write(contentsOf: data)
+        } else {
+            try? data.write(to: url)
+        }
+    }
+
     private var lastPushedHash: String = ""
     private var lastPushAt: Date = .distantPast
     private let heartbeatInterval: TimeInterval = 60
 
-    private var isInflight: Bool = false           // rate-limit: one request at a time
+    /// When the current request started, or nil when idle.
+    ///
+    /// A plain Bool here is a trap: any path that fails to clear it wedges the
+    /// pusher permanently and the dashboard silently goes stale forever, with the
+    /// app otherwise looking healthy. Storing the start time instead makes the
+    /// rate-limit self-healing — a request older than `inflightExpiry` is treated
+    /// as abandoned. Worst case we double-post one payload, which is idempotent.
+    private var inflightSince: Date?
+
+    /// Longer than the worst-case attempt chain (10s request timeout x3 plus
+    /// 2s + 4s backoff), so a live retry sequence is never cut short.
+    private let inflightExpiry: TimeInterval = 120
+
+    private var isInflight: Bool {
+        guard let since = inflightSince else { return false }
+        if Date().timeIntervalSince(since) > inflightExpiry {
+            Self.log("Previous request abandoned after \(Int(inflightExpiry))s — unblocking.")
+            inflightSince = nil
+            return false
+        }
+        return true
+    }
 
     // MARK: - ISO8601 formatter
 
@@ -191,7 +246,7 @@ public final class LidCodePusher: @unchecked Sendable {
         do {
             contents = try String(contentsOfFile: configPath, encoding: .utf8)
         } catch {
-            fputs("[lidcode-pusher] Cannot read \(configPath): \(error)\n", stderr)
+            Self.log("Cannot read \(configPath): \(error)")
             return
         }
 
@@ -219,10 +274,11 @@ public final class LidCodePusher: @unchecked Sendable {
         // posting a LidCode payload there would fail validation and could clobber warp_state.
         // Prefer an explicit LIDCODE_PUSH_URL, else reuse PUSH_URL's host with our own path.
         guard let url = Self.resolvePushURL(parsed) else {
-            fputs("[lidcode-pusher] No usable push URL — pusher disabled.\n", stderr)
+            Self.log("No usable push URL — pusher disabled.")
             return
         }
 
+        Self.log("Enabled — target \(url.absoluteString)")
         config = Config(pushURL: url, pushSecret: secret)
     }
 
@@ -263,7 +319,7 @@ public final class LidCodePusher: @unchecked Sendable {
     // MARK: - Private — all called on `queue`
 
     private func pushIfChangedOnQueue(_ snapshot: RuntimeSnapshot) {
-        guard let config else { return }   // disabled: no config / no secret
+        guard let config else { return }
 
         let payload = buildPayload(snapshot: snapshot, pushedAt: Date())
         let comparableHash = hashPayload(payload)
@@ -282,11 +338,13 @@ public final class LidCodePusher: @unchecked Sendable {
         let finalPayload = buildPayload(snapshot: snapshot, pushedAt: now)
         guard let body = encode(finalPayload) else { return }
 
-        isInflight = true
-        lastPushedHash = comparableHash
+        inflightSince = now
         lastPushAt = now
-
-        performRequest(body: body, config: config, attempt: 0)
+        // lastPushedHash is deliberately NOT set here. Recording it before the
+        // server accepts the payload would mark a failed push as delivered, and
+        // the state would not be retried until it happened to change again.
+        Self.log("POST \(config.pushURL.absoluteString) — \(finalPayload.sessions.count) session(s), \(body.count) bytes")
+        performRequest(body: body, config: config, attempt: 0, hash: comparableHash)
     }
 
     private func buildPayload(snapshot: RuntimeSnapshot, pushedAt: Date) -> LidCodePushPayload {
@@ -326,47 +384,43 @@ public final class LidCodePusher: @unchecked Sendable {
 
     /// Hash the payload with `pushed_at` excluded so identical state with only a
     /// timestamp difference does not trigger a push.
+    /// Hash of the fields worth waking the network for.
+    ///
+    /// The full payload changes on every single tick, because the temperature
+    /// sensor moves by fractions of a degree constantly. Hashing all of it meant a
+    /// POST every 5 seconds — roughly 700 an hour, which is precisely the kind of
+    /// idle chatter that exhausted the previous database's egress allowance.
+    ///
+    /// So only genuinely meaningful state forces an immediate push: whether the Mac
+    /// is being held awake, the lid, and each session's identity and status.
+    ///
+    /// Deliberately excluded: the foreign-blocker count, which oscillates constantly
+    /// because Claude Code spawns a short-lived `caffeinate` per session; the hold
+    /// deadline, which moves whenever a hold re-arms; and every sensor reading. All
+    /// of those still reach the dashboard, just on the 60-second heartbeat.
     private func hashPayload(_ payload: LidCodePushPayload) -> String {
-        // Build a comparable struct that omits pushed_at.
-        struct Comparable: Encodable {
+        struct Significant: Encodable {
             var schema_version: Int
             var mac_hostname: String
             var awake_held: Bool
             var physical_lid: String
-            var hold_expires_at: String?
-            var hold_elapsed_fraction: Double?
-            var battery_percent: Int?
-            var battery_on_main: Bool
-            var temperature_celsius: Double?
             var temperature_stale: Bool
-            var claude_five_hour_utilization: Double?
-            var claude_seven_day_utilization: Double?
-            var foreign_blocker_count: Int
-            var sessions: [LidCodeSessionPayload]
+            var sessions: [String]      // "id:status" — a status flip must go out at once
         }
 
-        let c = Comparable(
+        let c = Significant(
             schema_version: payload.schema_version,
             mac_hostname: payload.mac_hostname,
             awake_held: payload.awake_held,
             physical_lid: payload.physical_lid,
-            hold_expires_at: payload.hold_expires_at,
-            hold_elapsed_fraction: payload.hold_elapsed_fraction,
-            battery_percent: payload.battery_percent,
-            battery_on_main: payload.battery_on_main,
-            temperature_celsius: payload.temperature_celsius,
             temperature_stale: payload.temperature_stale,
-            claude_five_hour_utilization: payload.claude_five_hour_utilization,
-            claude_seven_day_utilization: payload.claude_seven_day_utilization,
-            foreign_blocker_count: payload.foreign_blocker_count,
-            sessions: payload.sessions
+            sessions: payload.sessions.map { "\($0.id):\($0.status)" }.sorted()
         )
 
         let encoder = JSONEncoder()
         encoder.outputFormatting = .sortedKeys
         guard let data = try? encoder.encode(c) else { return UUID().uuidString }
-        let digest = SHA256.hash(data: data)
-        return digest.compactMap { String(format: "%02x", $0) }.joined()
+        return SHA256.hash(data: data).compactMap { String(format: "%02x", $0) }.joined()
     }
 
     private func encode(_ payload: LidCodePushPayload) -> Data? {
@@ -375,12 +429,12 @@ public final class LidCodePusher: @unchecked Sendable {
         do {
             return try encoder.encode(payload)
         } catch {
-            fputs("[lidcode-pusher] Encoding failed: \(error)\n", stderr)
+            Self.log("Encoding failed: \(error)")
             return nil
         }
     }
 
-    private func performRequest(body: Data, config: Config, attempt: Int) {
+    private func performRequest(body: Data, config: Config, attempt: Int, hash: String) {
         // Max 3 retries (attempts 0, 1, 2 → delays 2s, 4s, 8s before giving up).
         let maxAttempt = 3
 
@@ -395,41 +449,42 @@ public final class LidCodePusher: @unchecked Sendable {
 
             self.queue.async {
                 if let error {
-                    fputs("[lidcode-pusher] Network error (attempt \(attempt)): \(error.localizedDescription)\n", stderr)
+                    Self.log("Network error (attempt \(attempt)): \(error.localizedDescription)")
                     if attempt < maxAttempt {
                         let delay = pow(2.0, Double(attempt + 1))   // 2s, 4s, 8s
                         self.queue.asyncAfter(deadline: .now() + delay) {
-                            self.performRequest(body: body, config: config, attempt: attempt + 1)
+                            self.performRequest(body: body, config: config, attempt: attempt + 1, hash: hash)
                         }
                     } else {
-                        self.isInflight = false
+                        self.inflightSince = nil
                     }
                     return
                 }
 
                 guard let http = response as? HTTPURLResponse else {
-                    self.isInflight = false
+                    self.inflightSince = nil
                     return
                 }
 
                 switch http.statusCode {
                 case 200, 201:
-                    break   // success — nothing to do
+                    Self.log("HTTP \(http.statusCode) — accepted")
+                    self.lastPushedHash = hash   // accepted — safe to suppress identical resends
                 case 400...499:
                     // 4xx: not retryable (client-side problem).
-                    fputs("[lidcode-pusher] HTTP \(http.statusCode) — not retrying.\n", stderr)
+                    Self.log("HTTP \(http.statusCode) — not retrying.")
                 default:
                     // 5xx / unexpected: retry with backoff.
-                    fputs("[lidcode-pusher] HTTP \(http.statusCode) (attempt \(attempt)) — retrying.\n", stderr)
+                    Self.log("HTTP \(http.statusCode) (attempt \(attempt)) — retrying.")
                     if attempt < maxAttempt {
                         let delay = pow(2.0, Double(attempt + 1))
                         self.queue.asyncAfter(deadline: .now() + delay) {
-                            self.performRequest(body: body, config: config, attempt: attempt + 1)
+                            self.performRequest(body: body, config: config, attempt: attempt + 1, hash: hash)
                         }
                         return
                     }
                 }
-                self.isInflight = false
+                self.inflightSince = nil
             }
         }
     }
@@ -448,5 +503,23 @@ extension LidCodePusher {
     var _lastPushedHash: String { lastPushedHash }
     var _lastPushAt: Date { lastPushAt }
     var _isInflight: Bool { isInflight }
+    var _inflightSince: Date? { inflightSince }
     var _isConfigured: Bool { config != nil }
 }
+
+#if DEBUG
+extension LidCodePusher {
+    /// Blocks until every queued push operation has run. Test-only.
+    func drainForTest() { queue.sync { } }
+
+    /// Backdates the in-flight marker so expiry can be exercised without waiting.
+    func forceInflightAgeForTest(_ seconds: TimeInterval) {
+        queue.sync { if inflightSince != nil { inflightSince = Date().addingTimeInterval(-seconds) } }
+    }
+
+    /// Backdates the last-push time so the heartbeat is due immediately.
+    func forceHeartbeatDueForTest() {
+        queue.sync { lastPushAt = Date().addingTimeInterval(-(heartbeatInterval + 1)) }
+    }
+}
+#endif

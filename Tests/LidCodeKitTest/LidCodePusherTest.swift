@@ -469,3 +469,132 @@ final class LidCodePushURLTest: XCTestCase {
         XCTAssertTrue(LidCodePusher.defaultPushURL.hasSuffix(LidCodePusher.lidcodePath))
     }
 }
+
+// MARK: - The pusher must never wedge permanently
+
+final class LidCodePusherWedgeTest: XCTestCase {
+
+    private func envFile() throws -> String {
+        let dir = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent("wedge-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        let f = dir.appendingPathComponent("env")
+        try "PUSH_SECRET=s\nLIDCODE_PUSH_URL=https://example.test/api/lidcode\n"
+            .write(to: f, atomically: true, encoding: .utf8)
+        return f.path
+    }
+
+    /// A transport that accepts the request and then never calls back — the exact
+    /// shape that previously stranded the flag and stopped all future pushes.
+    func testARequestThatNeverCompletesDoesNotBlockForever() throws {
+        var sent = 0
+        let pusher = LidCodePusher(configPath: try envFile()) { _, _ in sent += 1 }
+
+        pusher.pushIfChanged(makeSnapshot())
+        pusher.drainForTest()
+        XCTAssertEqual(sent, 1)
+
+        // Still within the expiry window: correctly suppressed.
+        pusher.forceInflightAgeForTest(10)
+        pusher.pushIfChanged(makeSnapshot())
+        pusher.drainForTest()
+        XCTAssertEqual(sent, 1, "should not double-post while a request is genuinely in flight")
+
+        // Past the expiry window: must recover on its own.
+        pusher.forceInflightAgeForTest(600)
+        pusher.pushIfChanged(makeSnapshot())
+        pusher.drainForTest()
+        XCTAssertEqual(sent, 2, "an abandoned request must not wedge the pusher permanently")
+    }
+
+    /// A failed push must not be recorded as delivered, or the state would sit
+    /// unsent until it happened to change again.
+    func testFailedPushIsRetriedOnTheNextHeartbeat() throws {
+        var sent = 0
+        let pusher = LidCodePusher(configPath: try envFile()) { _, done in
+            sent += 1
+            done(nil, HTTPURLResponse(url: URL(string: "https://example.test")!,
+                                      statusCode: 400, httpVersion: nil, headerFields: nil), nil)
+        }
+        pusher.pushIfChanged(makeSnapshot())
+        pusher.drainForTest()
+        XCTAssertEqual(sent, 1)
+
+        pusher.forceHeartbeatDueForTest()
+        pusher.pushIfChanged(makeSnapshot())
+        pusher.drainForTest()
+        XCTAssertEqual(sent, 2, "a rejected payload must be resent, not treated as delivered")
+    }
+}
+
+// MARK: - Push rate
+
+final class LidCodePushRateTest: XCTestCase {
+
+    private func envFile() throws -> String {
+        let dir = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent("rate-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        let f = dir.appendingPathComponent("env")
+        try "PUSH_SECRET=s\nLIDCODE_PUSH_URL=https://example.test/api/lidcode\n"
+            .write(to: f, atomically: true, encoding: .utf8)
+        return f.path
+    }
+
+    private func pusher(_ sent: @escaping () -> Void) throws -> LidCodePusher {
+        LidCodePusher(configPath: try envFile()) { _, done in
+            sent()
+            done(nil, HTTPURLResponse(url: URL(string: "https://example.test")!,
+                                      statusCode: 200, httpVersion: nil, headerFields: nil), nil)
+        }
+    }
+
+    /// Sensor drift must not put a request on the wire. This is the behaviour that
+    /// exhausted the previous database's egress budget.
+    func testTemperatureDriftAloneDoesNotPush() throws {
+        var sent = 0
+        let p = try pusher { sent += 1 }
+
+        p.pushIfChanged(makeSnapshot(thermal: ThermalReading(level: .nominal, celsius: 55.0)))
+        p.drainForTest()
+        XCTAssertEqual(sent, 1, "first push always goes")
+
+        for c in [55.4, 55.9, 56.2, 54.8, 57.1] {
+            p.pushIfChanged(makeSnapshot(thermal: ThermalReading(level: .nominal, celsius: c)))
+            p.drainForTest()
+        }
+        XCTAssertEqual(sent, 1, "drifting temperature must ride the heartbeat, not force a push")
+    }
+
+    /// A session changing status is the whole point of the dashboard — it must not wait.
+    func testSessionStatusChangePushesImmediately() throws {
+        var sent = 0
+        let p = try pusher { sent += 1 }
+        let base = AgentSessionInfo(
+            id: "s1", agent: "claude", cwd: "/tmp", project: "p", title: "t",
+            titleSource: "ai-title", status: .running, lastEvent: "prompt_submit",
+            lastSeenAt: Date(), statusChangedAt: Date())
+
+        p.pushIfChanged(makeSnapshot(sessions: [base]))
+        p.drainForTest()
+        XCTAssertEqual(sent, 1)
+
+        var blocked = base
+        blocked.status = .blocked
+        p.pushIfChanged(makeSnapshot(sessions: [blocked]))
+        p.drainForTest()
+        XCTAssertEqual(sent, 2, "a running -> blocked flip must go out at once")
+    }
+
+    func testLidAndAwakeChangesPushImmediately() throws {
+        var sent = 0
+        let p = try pusher { sent += 1 }
+        p.pushIfChanged(makeSnapshot(awakeHeld: true, physicalLid: .open))
+        p.drainForTest()
+        p.pushIfChanged(makeSnapshot(awakeHeld: true, physicalLid: .closed))
+        p.drainForTest()
+        p.pushIfChanged(makeSnapshot(awakeHeld: false, physicalLid: .closed))
+        p.drainForTest()
+        XCTAssertEqual(sent, 3)
+    }
+}
