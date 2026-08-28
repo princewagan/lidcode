@@ -57,15 +57,22 @@ public struct RuntimeSnapshot: Codable, Sendable {
     public var isAutoWatchOn: Bool
     /// The user turned the hold off by hand and nothing automatic may turn it back on.
     public var isUserPaused: Bool
-    /// Live agent activity, read from Warp's log every tick.
+    /// Live agent session truth, read from Warp's OSC 777 log every tick.
     ///
-    /// Never nil — an empty `SessionSnapshot` is a complete answer ("nothing is
-    /// running"), and making the UI unwrap an optional to discover that only invites
-    /// the two states being drawn the same way.
-    public var session: SessionSnapshot
+    /// Never nil — an empty `AgentSessionSnapshot` is a complete answer ("nothing is
+    /// running"), and making the UI unwrap an optional invites the empty and idle
+    /// states being drawn the same way.
+    public var agentSession: AgentSessionSnapshot
     /// Claude's rate-limit windows, when the usage file exists. nil is genuinely
     /// "unavailable", not "zero".
     public var usage: ClaudeUsage?
+    /// The physical lid state — whether the laptop lid is open, closed, or unknown.
+    /// Populated by `ClamshellStateReader.shared.read()` on every tick.
+    public var physicalLid: ClamshellReading
+    /// Number of sleep-blocking IOPMAssertion entries that are NOT owned by LidCode.
+    /// Parsed from `pmset -g assertions` every 6 ticks. Useful for the UI to explain
+    /// "other apps are also blocking sleep" (e.g. Claude Code spawns caffeinate per session).
+    public var foreignBlockerCount: Int
     /// How long the machine has been continuously at or above `thermalCeiling`. nil
     /// when it is below the ceiling.
     ///
@@ -82,6 +89,10 @@ public struct RuntimeSnapshot: Codable, Sendable {
     /// between a bug report and a mystery.
     public var isStalled: Bool
 
+    /// The user explicitly overrode the thermal/battery guard (F1-F4 button cycle).
+    /// When true, the hold continues despite a guard warning. Warnings still show.
+    public var isGuardOverrideOn: Bool
+
     public init(
         isAwakeHeld: Bool = false,
         isAssertionActive: Bool = false,
@@ -97,10 +108,13 @@ public struct RuntimeSnapshot: Codable, Sendable {
         blockedBy: StopReason? = nil,
         isAutoWatchOn: Bool = true,
         isUserPaused: Bool = false,
-        session: SessionSnapshot = .empty,
+        agentSession: AgentSessionSnapshot = .empty,
         usage: ClaudeUsage? = nil,
         hotSinceSecond: Int? = nil,
-        isStalled: Bool = false
+        isStalled: Bool = false,
+        physicalLid: ClamshellReading = ClamshellReading(state: .unknown, readAt: Date(), isStale: true),
+        foreignBlockerCount: Int = 0,
+        isGuardOverrideOn: Bool = false
     ) {
         self.isAwakeHeld = isAwakeHeld
         self.isAssertionActive = isAssertionActive
@@ -116,10 +130,13 @@ public struct RuntimeSnapshot: Codable, Sendable {
         self.blockedBy = blockedBy
         self.isAutoWatchOn = isAutoWatchOn
         self.isUserPaused = isUserPaused
-        self.session = session
+        self.agentSession = agentSession
         self.usage = usage
         self.hotSinceSecond = hotSinceSecond
         self.isStalled = isStalled
+        self.physicalLid = physicalLid
+        self.foreignBlockerCount = foreignBlockerCount
+        self.isGuardOverrideOn = isGuardOverrideOn
     }
 
     /// Decoded key by key with a fallback, for the same reason `Setting` is.
@@ -146,10 +163,14 @@ public struct RuntimeSnapshot: Codable, Sendable {
         blockedBy = try container.decodeIfPresent(StopReason.self, forKey: .blockedBy)
         isAutoWatchOn = try container.decodeIfPresent(Bool.self, forKey: .isAutoWatchOn) ?? true
         isUserPaused = try container.decodeIfPresent(Bool.self, forKey: .isUserPaused) ?? false
-        session = try container.decodeIfPresent(SessionSnapshot.self, forKey: .session) ?? .empty
+        agentSession = try container.decodeIfPresent(AgentSessionSnapshot.self, forKey: .agentSession) ?? .empty
         usage = try container.decodeIfPresent(ClaudeUsage.self, forKey: .usage)
         hotSinceSecond = try container.decodeIfPresent(Int.self, forKey: .hotSinceSecond)
         isStalled = try container.decodeIfPresent(Bool.self, forKey: .isStalled) ?? false
+        physicalLid = try container.decodeIfPresent(ClamshellReading.self, forKey: .physicalLid)
+            ?? ClamshellReading(state: .unknown, readAt: Date(), isStale: true)
+        foreignBlockerCount = try container.decodeIfPresent(Int.self, forKey: .foreignBlockerCount) ?? 0
+        isGuardOverrideOn = try container.decodeIfPresent(Bool.self, forKey: .isGuardOverrideOn) ?? false
     }
 
     public var runtimeSecond: Int {

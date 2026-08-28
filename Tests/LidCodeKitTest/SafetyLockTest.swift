@@ -112,6 +112,17 @@ final class SafetyLockTest: XCTestCase {
             thermal: { power.thermal })
     }
 
+    /// Helper: make a synthetic AgentSessionSnapshot with one running session for tests
+    /// that need to establish a hold (since the new predicate requires activeCount > 0).
+    private func runningSession() -> AgentSessionSnapshot {
+        let info = AgentSessionInfo(
+            id: "test-session", agent: "claude", cwd: "/tmp/test",
+            project: "test", title: "Test session", titleSource: "cwd-basename",
+            status: .running, lastEvent: "tool_complete",
+            lastSeenAt: Date(), statusChangedAt: Date())
+        return AgentSessionSnapshot(sessions: [info])
+    }
+
     /// The exact sequence seen live: hold, drop below the floor, release — and then the
     /// watcher reports the same still-running processes and must **not** re-acquire.
     func testAutoWatchDoesNotReArmAfterASafetyRelease() {
@@ -119,6 +130,9 @@ final class SafetyLockTest: XCTestCase {
         let runtime = makeRuntime(power)
         defer { runtime.shutdown() }
 
+        // The new predicate requires an active session (activeCount > 0) to hold.
+        // Inject a running session alongside the process scan.
+        runtime.setAgentSessionForTest(runningSession())
         runtime.applyScanForTest(["claude", "npm"])
         XCTAssertTrue(runtime.snapshot.isAwakeHeld, "a healthy battery should hold normally")
 
@@ -188,6 +202,7 @@ final class SafetyLockTest: XCTestCase {
         let runtime = makeRuntime(power)
         defer { runtime.shutdown() }
 
+        runtime.setAgentSessionForTest(runningSession())
         runtime.applyScanForTest(["claude"])
         runtime.tickForTest()
         XCTAssertNotNil(runtime.snapshot.blockedBy)
@@ -268,11 +283,23 @@ final class UserPauseTest: XCTestCase {
             thermal: { power.thermal })
     }
 
+    /// Synthetic running session for tests that need activeCount > 0 to establish a hold.
+    private func runningSession() -> AgentSessionSnapshot {
+        let info = AgentSessionInfo(
+            id: "test-session", agent: "claude", cwd: "/tmp/test",
+            project: "test", title: "Test session", titleSource: "cwd-basename",
+            status: .running, lastEvent: "tool_complete",
+            lastSeenAt: Date(), statusChangedAt: Date())
+        return AgentSessionSnapshot(sessions: [info])
+    }
+
     func testManualStopSurvivesTheNextProcessScan() {
         let power = Power()
         let runtime = makeRuntime(power)
         defer { runtime.shutdown() }
 
+        // Inject running session so the initial scan establishes a hold.
+        runtime.setAgentSessionForTest(runningSession())
         runtime.applyScanForTest(["npm", "esbuild", "uv"])
         XCTAssertTrue(runtime.snapshot.isAwakeHeld)
 
@@ -342,11 +369,14 @@ final class UserPauseTest: XCTestCase {
         let runtime = makeRuntime(power)
         defer { runtime.shutdown() }
 
+        // Inject a running session to satisfy the new predicate.
+        runtime.setAgentSessionForTest(runningSession())
         runtime.applyScanForTest(["npm"])
         runtime.endHold(reason: .workFinished)
         runtime.drainForTest()
         XCTAssertFalse(runtime.snapshot.isUserPaused)
 
+        // Work finishing is not a pause; a new hold with an active session should arm.
         runtime.applyScanForTest(["npm"])
         XCTAssertTrue(runtime.snapshot.isAwakeHeld, "a new workload should hold again")
     }

@@ -68,4 +68,25 @@ final class ProcessWatcherTest: XCTestCase {
                            "\(banned) runs continuously — watching it by name holds the Mac awake forever")
         }
     }
+
+    /// The narrowed default (plan step 1.2 / BUG 5) must contain exactly the six
+    /// agent-shaped binaries and nothing more.
+    func testDefaultPatternIsNarrowedToAgentBinaries() {
+        let pattern = Setting.default.watchPattern
+        let expected = ["claude", "codex", "cursor-agent", "aider", "xcodebuild", "swift-frontend"]
+        XCTAssertEqual(Set(pattern), Set(expected),
+                       "default watchPattern must contain only agent-shaped binaries (no npm, cargo, rsync etc.)")
+        XCTAssertEqual(pattern.count, expected.count, "count must match — no duplicates or extras")
+    }
+
+    /// Build tools and package managers removed in BUG 5 fix must not appear in the default.
+    func testDefaultPatternExcludesBuildToolsRemovedInBug5() {
+        let pattern = Set(Setting.default.watchPattern)
+        for removed in ["cargo", "rustc", "make", "ninja", "gradle", "npm", "pnpm", "yarn",
+                        "tsc", "esbuild", "python", "pytest", "uv", "poetry",
+                        "docker", "ffmpeg", "rsync", "pandoc"] {
+            XCTAssertFalse(pattern.contains(removed),
+                           "\(removed) was removed in BUG 5 — it is not an agent binary and idles indefinitely")
+        }
+    }
 }

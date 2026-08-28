@@ -135,8 +135,33 @@ public final class LidCodeRuntime: @unchecked Sendable {
     /// touch the filesystem — so they are read here, on the queue, and never from the
     /// main thread. The results ride out through the snapshot like everything else.
     private let sessionReader: AgentSessionReader
-    private var session: SessionSnapshot = .empty
+    private var agentSession: AgentSessionSnapshot = .empty
     private var usage: ClaudeUsage?
+
+    // MARK: - New ivars (W1)
+
+    /// After a `.timerExpired` stop, nothing auto-re-arms until this clears.
+    /// Cleared when the user explicitly re-enables the mode, or when all sessions
+    /// go to `.finished` and a new `.running` session begins.
+    private var cooldownUntil: Date?
+
+    /// Previous `agentSession.activeCount` — used to detect "zero → nonzero" transitions
+    /// that clear the post-timer cooldown.
+    private var previousActiveCount: Int = 0
+
+    /// Timestamp of the last tick in which `readThermal()` returned a non-nil `celsius`.
+    /// Used to compute `isCelsiusStale` in `makeSnapshot()`.
+    private var lastThermalAt: Date?
+
+    /// Cached count of foreign sleep assertions (those NOT owned by LidCode).
+    /// Updated every 6 ticks (same cadence as health).
+    private var cachedForeignBlockerCount: Int = 0
+
+    /// When true, the user has explicitly asked to override the thermal/battery guard
+    /// (F1-F4 button cycle). The guard is bypassed for hold decisions, but warnings
+    /// are still shown. Does NOT bypass the hard battery floor or critical-heat-lid-closed
+    /// forced sleep. Cleared when the user disables the hold or guard conditions resolve.
+    private var isGuardOverrideOn: Bool = false
 
     // MARK: - The lock-guarded mirror
     //
@@ -205,6 +230,19 @@ public final class LidCodeRuntime: @unchecked Sendable {
         startWatchdog()
         queue.async { [weak self] in
             guard let self, self.timer == nil else { return }
+
+            // Restore a persisted hold expiry if it is still in the future (plan step 1.8).
+            if let saved = self.setting.activeHoldExpiresAt, saved > Date() {
+                self.expiresAt = saved
+                // Re-acquire the IOPMAssertion to continue the hold.
+                if self.assertion.acquire(reason: "LidCode is protecting a running job") {
+                    self.isHeld = true
+                    self.startedAt = Date()  // session start from perspective of this process
+                    self.log.append(LogEntry(kind: .holdStarted,
+                        detail: "restored hold after restart, expires at \(saved)"))
+                }
+            }
+
             let source = DispatchSource.makeTimerSource(queue: self.queue)
             source.schedule(deadline: .now(), repeating: .seconds(Self.tickIntervalSecond))
             source.setEventHandler { [weak self] in self?.tick() }
@@ -344,8 +382,16 @@ public final class LidCodeRuntime: @unchecked Sendable {
         }
         guard helper.isAvailable else { throw LidCodeError.helperMissing }
         try helper.connect()
+        // User explicitly enabling clamshell mode clears any post-timer cooldown.
+        cooldownUntil = nil
         beginHoldLocked(second: second, mode: mode)
-        try setClamshellLockedThrowing(true)
+        // Only apply disablesleep if the lid is physically closed.
+        let lidClosed = ClamshellStateReader.shared.read().state == .closed
+        if lidClosed {
+            try setClamshellLockedThrowing(true)
+        } else {
+            log.append(LogEntry(kind: .note, detail: "lid open: clamshell mode armed, disablesleep deferred until lid closes"))
+        }
     }
 
     /// The app tells the runtime whether the CLI socket actually bound. Losing that
@@ -387,6 +433,33 @@ public final class LidCodeRuntime: @unchecked Sendable {
 
     public func setThermalGuard(_ isOn: Bool) {
         setGuard(isBattery: false, isOn: isOn)
+    }
+
+    /// Override the thermal/battery guard so the hold continues despite a guard warning.
+    /// This is the OVERRIDE state in the F1-F4 button cycle. Only bypasses the soft
+    /// guard (`safetyLock`); never bypasses hard battery floor or critical-heat+lid-closed.
+    /// Warnings continue to reflect real hardware state regardless of this flag.
+    public func setGuardOverride(_ isOn: Bool) {
+        queue.async { [weak self] in
+            guard let self else { return }
+            self.isGuardOverrideOn = isOn
+            if isOn, let safetyLock = self.safetyLock {
+                // Override engaged — the guard is bypassed. Clear the safety lock so the
+                // hold can proceed. The governor will still evaluate and warn each tick,
+                // but won't re-engage the lock while override is active (see tick).
+                self.log.append(LogEntry(
+                    kind: .note,
+                    detail: "guard override: bypassing \(safetyLock.summary), hold continues"))
+                self.safetyLock = nil
+                // Re-arm if we had work and a hold.
+                self.beginHoldLocked(second: nil, mode: .smart, isUserInitiated: true)
+            } else if !isOn {
+                self.log.append(LogEntry(kind: .note, detail: "guard override: off"))
+                self.publish()
+            } else {
+                self.publish()
+            }
+        }
     }
 
     private func setGuard(isBattery: Bool, isOn: Bool) {
@@ -536,7 +609,14 @@ public final class LidCodeRuntime: @unchecked Sendable {
             // The lease is recorded either way — the work is real and the panel should
             // say so — but a claim does not override a safety stop. Otherwise an agent
             // hook firing every turn walks straight through the battery floor.
-            if !isHeld && safetyLock == nil {
+            // Also check cooldown (BUG 1 fix).
+            // An explicit claim (non-process source) satisfies hasRealWork on its own,
+            // because it is the agent saying out loud "I am working". No running session
+            // needed — the agent IS the session here.
+            let inCooldown = cooldownUntil.map { Date() < $0 } ?? false
+            // The new claim is already in the registry at this point.
+            let hasRealWork = agentSession.activeCount > 0 || registry.active.contains { $0.source != .process }
+            if !isHeld && safetyLock == nil && !inCooldown && hasRealWork {
                 beginHoldLocked(second: nil, mode: .smart, isUserInitiated: false)
             }
             lastLeaseSeenAt = Date()
@@ -743,6 +823,8 @@ public final class LidCodeRuntime: @unchecked Sendable {
         if isUserInitiated {
             clearSafetyLockLocked()
             isUserPaused = false
+            // A user-initiated hold always clears the post-timer cooldown.
+            cooldownUntil = nil
         } else {
             let verdict = governor.evaluate(
                 battery: readBattery(), thermal: readThermal(),
@@ -754,13 +836,26 @@ public final class LidCodeRuntime: @unchecked Sendable {
             }
         }
         self.mode = mode
-        if let second {
-            expiresAt = Date().addingTimeInterval(TimeInterval(min(second, Setting.maxSessionSecond)))
-        } else {
-            expiresAt = nil
+
+        // BUG 2 FIX: guard !isHeld BEFORE writing expiresAt, so a nil-second re-arm
+        // call cannot silently clear a live deadline on an already-held session.
+        guard !isHeld else {
+            // Already held — only update expiry if the caller explicitly supplied one.
+            // Never clear a live deadline with nil (that's the bug).
+            if let second {
+                expiresAt = Date().addingTimeInterval(
+                    TimeInterval(min(second, Setting.maxSessionSecond)))
+                persistExpiresAtLocked()
+            }
+            publish()
+            return
         }
 
-        guard !isHeld else { publish(); return }
+        // BUG 1 FIX: nil means "use the user's configured holdSecond", never indefinite.
+        let effectiveSecond = second ?? setting.holdSecond
+        expiresAt = Date().addingTimeInterval(
+            TimeInterval(min(effectiveSecond, Setting.maxSessionSecond)))
+        persistExpiresAtLocked()
 
         guard assertion.acquire(reason: "LidCode is protecting a running job") else {
             log.append(LogEntry(kind: .note, detail: "could not create power assertion"))
@@ -776,17 +871,36 @@ public final class LidCodeRuntime: @unchecked Sendable {
         lastStopReason = nil
         log.append(LogEntry(
             kind: .holdStarted,
-            detail: "mode \(mode.rawValue)" + (second.map { ", timer \($0)s" } ?? ", no timer"),
+            detail: "mode \(mode.rawValue)" + (second.map { ", timer \($0)s" } ?? ", timer \(effectiveSecond)s (default)"),
             batteryPercent: readBattery().percent,
             thermal: readThermal().level
         ))
+        // Apply disablesleep only if the lid is physically closed.
+        if isClamshellActive {
+            let lidClosed = ClamshellStateReader.shared.read().state == .closed
+            if lidClosed {
+                setClamshellLocked(true)
+            } else {
+                // Lid is open — hold the IOPMAssertion but NOT disablesleep.
+                log.append(LogEntry(kind: .note, detail: "lid open: skipping disablesleep, assertion-only hold"))
+            }
+        }
         publish()
+    }
+
+    /// Persist the current `expiresAt` into `setting.activeHoldExpiresAt` so that
+    /// an app restart can resume the original deadline.
+    private func persistExpiresAtLocked() {
+        setting.activeHoldExpiresAt = expiresAt
+        persistLocked()
     }
 
     private func stopLocked(reason: StopReason) {
         // Only a hand-made stop pauses. A timer running out or work finishing is the
         // system doing its job, and the next real workload should hold normally.
         if reason == .userStopped { isUserPaused = true }
+        // User explicitly stopping also clears guard override (F1-F4 cycle: state 3 → 4).
+        if reason == .userStopped { isGuardOverrideOn = false }
         if isClamshellActive { setClamshellLocked(false) }
         // Stopping something that was not running still set `isUserPaused` above, and
         // that is the whole point of the flag — so it has to reach the mirror.
@@ -798,6 +912,19 @@ public final class LidCodeRuntime: @unchecked Sendable {
         startedAt = nil
         expiresAt = nil
         lastStopReason = reason
+
+        // BUG 1 FIX: After a timer expiry, prevent re-arming until the user explicitly
+        // enables again, or until all sessions finish and a brand-new one starts.
+        if reason == .timerExpired {
+            // Set cooldown far in the future; it is cleared by the user toggle or a
+            // genuine new session starting after all were finished.
+            cooldownUntil = Date().addingTimeInterval(24 * 3600)  // effectively permanent until cleared
+        }
+
+        // Clear the persisted expiry — the hold is done.
+        setting.activeHoldExpiresAt = nil
+        persistLocked()
+
         registry.releaseAll()
 
         log.append(LogEntry(
@@ -890,13 +1017,20 @@ public final class LidCodeRuntime: @unchecked Sendable {
         registry.replaceProcessLease(label)
         if !label.isEmpty {
             lastLeaseSeenAt = Date()
+            // Guard: do not re-arm during cooldown (BUG 1 fix).
+            let inCooldown = cooldownUntil.map { Date() < $0 } ?? false
             // `safetyLock` is the whole reason this condition is not just `!isHeld`.
             // The watched processes are still running *because* the governor released
             // the Mac rather than killing anything, so without the lock this line
             // re-acquires the hold ~10s after every safety stop, the next tick stops it
             // again, and the floor becomes a 10-second flap that never actually lets the
             // Mac sleep — while re-notifying the user on every cycle.
-            if !isHeld && isAutoWatchOn && safetyLock == nil && !isUserPaused {
+            //
+            // NEW (W1): process presence alone does NOT satisfy the keep-awake predicate.
+            // A session with .running status is required (agentSession.activeCount > 0).
+            let hasActiveSession = agentSession.activeCount > 0
+            if !isHeld && isAutoWatchOn && safetyLock == nil && !isUserPaused
+                && !inCooldown && hasActiveSession {
                 beginHoldLocked(second: nil, mode: .smart, isUserInitiated: false)
             }
         }
@@ -912,11 +1046,30 @@ public final class LidCodeRuntime: @unchecked Sendable {
         let battery = readBattery()
         let thermal = readThermal()
 
+        // Track when we last had a real celsius reading, for staleness flagging.
+        if thermal.celsius != nil { lastThermalAt = Date() }
+
         // Both readers are internally cached against file mtime, so this is a `stat`
         // and a dictionary filter on the overwhelming majority of ticks. It still has
         // to happen here rather than in the view: they touch the filesystem, and the
         // main thread is not allowed to.
-        session = sessionReader.read()
+        let newAgentSession = sessionReader.readAgentSession()
+        let newActiveCount = newAgentSession.activeCount
+
+        // BUG 1 FIX: Cooldown clearing rule. After a .timerExpired stop, the cooldown
+        // is permanent until:
+        //   (a) the user re-enables the mode (clears in claim / setClamshell path), OR
+        //   (b) all sessions went to 0 and a new one just became >0 (brand-new session).
+        if let cu = cooldownUntil, Date() < cu {
+            // Still in cooldown. Clear if: previously zero AND now non-zero.
+            if previousActiveCount == 0 && newActiveCount > 0 {
+                cooldownUntil = nil
+                log.append(LogEntry(kind: .note, detail: "cooldown cleared: new running session detected after all finished"))
+            }
+        }
+        previousActiveCount = newActiveCount
+        agentSession = newAgentSession
+
         usage = ClaudeUsageReader.read()
 
         // The sustained-heat clock. Started on the first tick at or above the ceiling
@@ -942,12 +1095,14 @@ public final class LidCodeRuntime: @unchecked Sendable {
         tickCount += 1
         if tickCount % Self.healthEveryTick == 1 {
             refreshHealthLocked(battery: battery, thermal: thermal)
+            // Also update foreign blocker count on the same cadence.
+            cachedForeignBlockerCount = Self.countForeignSleepBlockers()
         }
 
         // Lock maintenance runs *before* the guard below, because a lock is held while
         // nothing is held — that is the point of it. Checked here, it lifts on its own
-        // as soon as the machine recovers.
-        if safetyLock != nil {
+        // as soon as the machine recovers. Guard override bypasses lock re-engagement.
+        if safetyLock != nil, !isGuardOverrideOn {
             let verdict = governor.evaluate(
                 battery: battery, thermal: thermal, isClamshellActive: isClamshellActive,
                 hotForSecond: hotForSecond())
@@ -957,6 +1112,55 @@ public final class LidCodeRuntime: @unchecked Sendable {
             // 35% or mains power. Clearing on `.warn` would re-acquire at 26% and drop
             // again at 25% — the same flap in slower motion.
             if verdict == .proceed { clearSafetyLockLocked() }
+        } else if safetyLock != nil, isGuardOverrideOn {
+            // Override is active — clear any stale lock so the hold can proceed.
+            clearSafetyLockLocked()
+        }
+
+        // NEW KEEP-AWAKE PREDICATE (W1, plan step 1.3):
+        //   Hold ONLY IF:
+        //   (a) user mode is ON (not paused), AND
+        //   (b) agentSession.activeCount > 0 (a .running session exists), OR an explicit
+        //       non-process lease is active (keyed claim), AND
+        //   (c) the deadline has not passed and we are not in cooldown, AND
+        //   (d) the safety guards are OK.
+        //
+        // Process-presence leases (source == .process) alone do NOT satisfy condition (b).
+        let hasActiveSession = agentSession.activeCount > 0
+        let hasNonProcessLease = registry.active.contains { $0.source != .process }
+        let hasRealWork = hasActiveSession || hasNonProcessLease
+        let inCooldown = cooldownUntil.map { Date() < $0 } ?? false
+        let deadlineOk = expiresAt == nil || Date() < expiresAt!
+        let safetyOk = safetyLock == nil
+
+        // BUG 6 FIX: If the lid-open state is detected while disablesleep is on, revert it.
+        // This corrects a stuck `disablesleep 1` when the user opens the lid without
+        // going through the UI toggle.
+        let physicalLid = ClamshellStateReader.shared.read()
+        if isClamshellActive && physicalLid.state == .open {
+            // Lid is open — disablesleep must be 0.
+            log.append(LogEntry(kind: .clamshellOff, detail: "lid opened while disablesleep was on, reverting"))
+            setClamshellLocked(false)
+        }
+
+        let shouldHold = !isUserPaused && hasRealWork && safetyOk && deadlineOk && !inCooldown
+
+        // Auto-release: if we are currently holding but the predicate is false, stop.
+        if isHeld && !shouldHold {
+            // Already handled by timer/safety paths below — but cover the case where
+            // hasRealWork went false (session finished) without a timer expiry.
+            // Do NOT call stopLocked here for timer expiry; let the explicit check below do it.
+            if !deadlineOk {
+                // Will be handled by the explicit timer check below.
+            } else if !hasRealWork && isHeld && mode == .smart {
+                // Work genuinely finished — let the idle-release window handle it.
+                // (This path already exists below.)
+            }
+        }
+
+        // Auto-arm: if we are not holding but the predicate is true, start a hold.
+        if !isHeld && shouldHold && isAutoWatchOn && !isUserPaused && safetyOk && !inCooldown {
+            beginHoldLocked(second: nil, mode: .smart, isUserInitiated: false)
         }
 
         // Safety runs whenever the lid is held shut, even with no hold of our own —
@@ -991,10 +1195,22 @@ public final class LidCodeRuntime: @unchecked Sendable {
             return
 
         case .release(let reason):
-            engageSafetyLockLocked(reason)
-            onAlert?("Releasing your Mac: \(reason.summary)")
-            stopLocked(reason: reason)
-            return
+            // Guard override (F1-F4): skip the release when user has explicitly overridden.
+            // Hard battery floor and critical-heat-lid-closed (forceSleep) are never skipped.
+            if isGuardOverrideOn {
+                // Still warn but do not stop.
+                let message = "Override active — ignoring guard: \(reason.summary)"
+                if message != lastWarning {
+                    lastWarning = message
+                    log.append(LogEntry(kind: .safetyWarned, detail: message,
+                                        batteryPercent: battery.percent, thermal: thermal.level))
+                }
+            } else {
+                engageSafetyLockLocked(reason)
+                onAlert?("Releasing your Mac: \(reason.summary)")
+                stopLocked(reason: reason)
+                return
+            }
 
         case .warn(let message):
             if message != lastWarning {
@@ -1008,14 +1224,22 @@ public final class LidCodeRuntime: @unchecked Sendable {
             lastWarning = nil
         }
 
+        // Timer expiry with lid-closed → sleep the Mac (BUG 1 / plan step 1.7).
         if let expiresAt, Date() >= expiresAt {
+            let lidNowClosed = ClamshellStateReader.shared.read().state == .closed
             stopLocked(reason: .timerExpired)
+            if lidNowClosed {
+                log.append(LogEntry(kind: .note, detail: "pmset sleepnow after timer expiry (lid was closed)"))
+                try? helper.sleepNow(reason: "Session timer expired with lid closed")
+            }
             return
         }
 
-        // Smart mode: release once every lease has been gone for the idle window.
+        // Smart mode: release once every lease has been gone for the idle window,
+        // or once the agentSession has no .running sessions.
         if mode == .smart {
-            if registry.isEmpty {
+            // Release when there is no real work remaining.
+            if !hasRealWork {
                 let idleSince = lastLeaseSeenAt ?? startedAt ?? Date()
                 if Date().timeIntervalSince(idleSince) >= TimeInterval(setting.idleReleaseSecond) {
                     stopLocked(reason: .workFinished)
@@ -1029,6 +1253,23 @@ public final class LidCodeRuntime: @unchecked Sendable {
         publish()
     }
 
+    /// Count sleep-blocking IOPMAssertions NOT owned by LidCode.
+    /// Parses `pmset -g assertions` and counts `PreventUserIdleSystemSleep` lines
+    /// that do not contain "LidCode". Bounded by `ShellCommand` timeout.
+    private static func countForeignSleepBlockers() -> Int {
+        guard let output = ShellCommand.run(
+            "/usr/bin/pmset", ["-g", "assertions"], timeoutSecond: 4
+        ) else { return 0 }
+
+        var count = 0
+        for line in output.split(separator: "\n") {
+            guard line.contains("PreventUserIdleSystemSleep") else { continue }
+            guard !line.contains("LidCode") else { continue }
+            count += 1
+        }
+        return count
+    }
+
     // MARK: - Test seams
 
     /// Run one loop iteration synchronously, instead of waiting out the 5s timer.
@@ -1036,6 +1277,12 @@ public final class LidCodeRuntime: @unchecked Sendable {
 
     /// Deliver a process scan as the watcher would, without a real `ps`.
     func applyScanForTest(_ label: [String]) { queue.sync { applyScan(label) } }
+
+    /// Inject a synthetic agent session snapshot for testing.
+    /// Allows tests to simulate an active session without a real warp.log.
+    func setAgentSessionForTest(_ session: AgentSessionSnapshot) {
+        queue.sync { agentSession = session }
+    }
 
     /// Stop this runtime writing to `~/.lidcode/setting.json`.
     ///
@@ -1097,7 +1344,15 @@ public final class LidCodeRuntime: @unchecked Sendable {
     }
 
     private func makeSnapshot() -> RuntimeSnapshot {
-        RuntimeSnapshot(
+        var thermal = readThermal()
+        // Staleness: isCelsiusStale is true when the last good celsius read is >30s old.
+        if thermal.celsius != nil {
+            thermal.isCelsiusStale = lastThermalAt.map { Date().timeIntervalSince($0) > 30 } ?? false
+        } else {
+            thermal.isCelsiusStale = false  // sensor simply unavailable, not stale
+        }
+
+        return RuntimeSnapshot(
             isAwakeHeld: isHeld,
             isAssertionActive: assertion.isActive,
             isClamshellActive: isClamshellActive,
@@ -1106,19 +1361,22 @@ public final class LidCodeRuntime: @unchecked Sendable {
             expiresAt: expiresAt,
             activeLease: registry.active.map(\.display),
             battery: readBattery(),
-            thermal: readThermal(),
+            thermal: thermal,
             lastStopReason: lastStopReason,
             health: health,
             blockedBy: safetyLock,
             isAutoWatchOn: isAutoWatchOn,
             isUserPaused: isUserPaused,
-            session: session,
+            agentSession: agentSession,
             usage: usage,
             hotSinceSecond: hotSince == nil ? nil : hotForSecond(),
             // Stamped by the reader in `snapshot`, never here. A value written on the
             // queue could only ever say "not stalled", because a stalled queue is by
             // definition not running this line.
-            isStalled: false
+            isStalled: false,
+            physicalLid: ClamshellStateReader.shared.read(),
+            foreignBlockerCount: cachedForeignBlockerCount,
+            isGuardOverrideOn: isGuardOverrideOn
         )
     }
 

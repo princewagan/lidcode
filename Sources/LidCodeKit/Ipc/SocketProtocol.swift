@@ -50,6 +50,13 @@ public struct SettingPatch: Codable, Sendable {
     public var isThermalGuardOn: Bool?
     public var sustainedHeatSecond: Int?
     public var holdSecond: Int?
+    // Menu bar icon visibility toggles (I1, I2)
+    public var menuBarShowStateIcon: Bool?
+    public var menuBarShowActiveBadge: Bool?
+    public var menuBarShowBlockedBadge: Bool?
+    public var menuBarShowErrorBadge: Bool?
+    public var menuBarShowTempWarnIcon: Bool?
+    public var menuBarShowAlertIcon: Bool?
 
     public init(
         softBatteryPercent: Int? = nil,
@@ -61,7 +68,13 @@ public struct SettingPatch: Codable, Sendable {
         isBatteryGuardOn: Bool? = nil,
         isThermalGuardOn: Bool? = nil,
         sustainedHeatSecond: Int? = nil,
-        holdSecond: Int? = nil
+        holdSecond: Int? = nil,
+        menuBarShowStateIcon: Bool? = nil,
+        menuBarShowActiveBadge: Bool? = nil,
+        menuBarShowBlockedBadge: Bool? = nil,
+        menuBarShowErrorBadge: Bool? = nil,
+        menuBarShowTempWarnIcon: Bool? = nil,
+        menuBarShowAlertIcon: Bool? = nil
     ) {
         self.softBatteryPercent = softBatteryPercent
         self.hardBatteryPercent = hardBatteryPercent
@@ -73,6 +86,12 @@ public struct SettingPatch: Codable, Sendable {
         self.isThermalGuardOn = isThermalGuardOn
         self.sustainedHeatSecond = sustainedHeatSecond
         self.holdSecond = holdSecond
+        self.menuBarShowStateIcon = menuBarShowStateIcon
+        self.menuBarShowActiveBadge = menuBarShowActiveBadge
+        self.menuBarShowBlockedBadge = menuBarShowBlockedBadge
+        self.menuBarShowErrorBadge = menuBarShowErrorBadge
+        self.menuBarShowTempWarnIcon = menuBarShowTempWarnIcon
+        self.menuBarShowAlertIcon = menuBarShowAlertIcon
     }
 
     public var isEmpty: Bool {
@@ -80,6 +99,9 @@ public struct SettingPatch: Codable, Sendable {
             && isChargingOnly == nil && thermalCeiling == nil && isNetworkProbeOn == nil
             && isBatteryGuardOn == nil && isThermalGuardOn == nil
             && sustainedHeatSecond == nil && holdSecond == nil
+            && menuBarShowStateIcon == nil && menuBarShowActiveBadge == nil
+            && menuBarShowBlockedBadge == nil && menuBarShowErrorBadge == nil
+            && menuBarShowTempWarnIcon == nil && menuBarShowAlertIcon == nil
     }
 
     public func applied(to setting: Setting) -> Setting {
@@ -94,6 +116,12 @@ public struct SettingPatch: Codable, Sendable {
         if let isThermalGuardOn { copy.isThermalGuardOn = isThermalGuardOn }
         if let sustainedHeatSecond { copy.sustainedHeatSecond = sustainedHeatSecond }
         if let holdSecond { copy.holdSecond = holdSecond }
+        if let menuBarShowStateIcon { copy.menuBarShowStateIcon = menuBarShowStateIcon }
+        if let menuBarShowActiveBadge { copy.menuBarShowActiveBadge = menuBarShowActiveBadge }
+        if let menuBarShowBlockedBadge { copy.menuBarShowBlockedBadge = menuBarShowBlockedBadge }
+        if let menuBarShowErrorBadge { copy.menuBarShowErrorBadge = menuBarShowErrorBadge }
+        if let menuBarShowTempWarnIcon { copy.menuBarShowTempWarnIcon = menuBarShowTempWarnIcon }
+        if let menuBarShowAlertIcon { copy.menuBarShowAlertIcon = menuBarShowAlertIcon }
         return copy.normalized()
     }
 }

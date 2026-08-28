@@ -38,6 +38,16 @@ final class RuntimeCacheTest: XCTestCase {
         return runtime
     }
 
+    /// Helper: synthetic running session for tests that need activeCount > 0 to hold.
+    private func runningSession() -> AgentSessionSnapshot {
+        let info = AgentSessionInfo(
+            id: "test-session", agent: "claude", cwd: "/tmp/test",
+            project: "test", title: "Test session", titleSource: "cwd-basename",
+            status: .running, lastEvent: "tool_complete",
+            lastSeenAt: Date(), statusChangedAt: Date())
+        return AgentSessionSnapshot(sessions: [info])
+    }
+
     /// The load-bearing test. A block is parked on the runtime queue for a full second;
     /// every public read has to come back immediately anyway.
     func testReadsDoNotWaitOnABlockedRuntimeQueue() {
@@ -45,6 +55,8 @@ final class RuntimeCacheTest: XCTestCase {
         defer { runtime.shutdown() }
 
         // Establish a snapshot first, so there is something real in the mirror.
+        // The new predicate requires activeCount > 0 (a running session) to hold.
+        runtime.setAgentSessionForTest(runningSession())
         runtime.applyScanForTest(["claude"])
 
         let occupied = expectation(description: "queue occupied")
@@ -150,6 +162,8 @@ final class RuntimeCacheTest: XCTestCase {
         runtime.disablePersistenceForTest()
         defer { runtime.shutdown() }
 
+        // The new predicate requires activeCount > 0 to hold.
+        runtime.setAgentSessionForTest(runningSession())
         runtime.applyScanForTest(["claude"])
         XCTAssertTrue(runtime.snapshot.isAwakeHeld, "30% is comfortably above the 20% floor")
 
@@ -232,7 +246,7 @@ final class RuntimeCacheTest: XCTestCase {
 
         runtime.tickForTest()
         let snapshot = runtime.snapshot
-        XCTAssertEqual(snapshot.session, .empty, "no log means no sessions, not a nil field")
-        XCTAssertTrue(snapshot.session.active.isEmpty)
+        XCTAssertEqual(snapshot.agentSession, .empty, "no log means no sessions, not a nil field")
+        XCTAssertTrue(snapshot.agentSession.sessions.isEmpty)
     }
 }

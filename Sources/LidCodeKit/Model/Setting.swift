@@ -46,13 +46,38 @@ public struct Setting: Codable, Sendable, Equatable {
     public var sustainedHeatSecond: Int
     /// The duration slider's value: how long a timed hold runs for.
     public var holdSecond: Int
+    /// The deadline of the most-recently started timed hold, persisted so that
+    /// an app restart mid-hold continues from the original expiry rather than
+    /// giving the user a fresh 6-hour window. Cleared when the hold ends.
+    ///
+    /// `LidCodeRuntime.start()` reads this on launch; `stopLocked` clears it;
+    /// `beginHoldLocked` writes it whenever a new expiry is computed.
+    public var activeHoldExpiresAt: Date?
+
+    // ── Menu bar icon visibility toggles (I1, I2) ──────────────────────────────
+    // All default to true. Each hides its corresponding element from the menu bar.
+    // Persisted with decodeIfPresent so existing settings files continue to load.
+
+    /// Show the main state icon (bolt/slash/laptop) in the menu bar.
+    public var menuBarShowStateIcon: Bool
+    /// Show the active-sessions count badge (blue circle) in the menu bar.
+    public var menuBarShowActiveBadge: Bool
+    /// Show the blocked-sessions count badge (yellow circle) in the menu bar.
+    public var menuBarShowBlockedBadge: Bool
+    /// Show the errored-sessions count badge (red circle) in the menu bar.
+    public var menuBarShowErrorBadge: Bool
+    /// Show the non-blocking temperature warning icon (orange thermometer) in the menu bar.
+    public var menuBarShowTempWarnIcon: Bool
+    /// Show the blocking guard alert icon (red thermometer / red battery) in the menu bar.
+    public var menuBarShowAlertIcon: Bool
 
     public static let softBatteryRange = 15...50
     public static let hardBatteryRange = 4...8
-    public static let maxSessionSecond = 8 * 3600
-    /// Half an hour to eight hours. The lower bound is not a UI nicety — a hold shorter
-    /// than the health sweep's own cadence would expire before the panel had anything
-    /// true to say about it.
+    /// Changed from 8h to 6h so the slider's intervals are better spaced (J6).
+    public static let maxSessionSecond = 6 * 3600
+    /// Half an hour to six hours (J6). The lower bound is not a UI nicety — a hold
+    /// shorter than the health sweep's own cadence would expire before the panel had
+    /// anything true to say about it.
     public static let holdRange = 1800...maxSessionSecond
     /// The slider snaps to half-hour steps. A duration picked by dragging does not
     /// deserve minute precision, and round numbers are what people actually check
@@ -83,12 +108,14 @@ public struct Setting: Codable, Sendable, Equatable {
         // they are installed and open, so watching them by name would hold the Mac
         // awake permanently on an idle machine. Those cases belong to `lidcode claim`,
         // where the thing doing the work says when it starts and stops.
+        // Narrowed to agent-shaped binaries only (plan step 1.2 / BUG 5).
+        // Process presence alone no longer satisfies the keep-awake predicate —
+        // that role belongs to the session state machine in AgentSessionReader.
+        // The remaining six entries are genuine AI-agent binaries that start,
+        // do real work, and exit — they have no daemon/idle form.
         watchPattern: [
             "claude", "codex", "cursor-agent", "aider",
-            "xcodebuild", "swift-frontend", "cargo", "rustc", "make", "ninja", "gradle",
-            "npm", "pnpm", "yarn", "tsc", "esbuild",
-            "python", "pytest", "uv", "poetry",
-            "docker", "ffmpeg", "rsync", "pandoc",
+            "xcodebuild", "swift-frontend",
         ],
         isNetworkProbeOn: true,
         // Both guards ship on. The whole safety argument collapses if the guardrail is
@@ -96,7 +123,14 @@ public struct Setting: Codable, Sendable, Equatable {
         isBatteryGuardOn: true,
         isThermalGuardOn: true,
         sustainedHeatSecond: 900,
-        holdSecond: 8 * 3600
+        holdSecond: 6 * 3600,
+        // All menu bar icons default to visible (I2).
+        menuBarShowStateIcon: true,
+        menuBarShowActiveBadge: true,
+        menuBarShowBlockedBadge: true,
+        menuBarShowErrorBadge: true,
+        menuBarShowTempWarnIcon: true,
+        menuBarShowAlertIcon: true
     )
 
     /// Every parameter added after `isNetworkProbeOn` has a default, so the existing
@@ -112,7 +146,14 @@ public struct Setting: Codable, Sendable, Equatable {
         isBatteryGuardOn: Bool = true,
         isThermalGuardOn: Bool = true,
         sustainedHeatSecond: Int = 900,
-        holdSecond: Int = 8 * 3600
+        holdSecond: Int = 6 * 3600,
+        activeHoldExpiresAt: Date? = nil,
+        menuBarShowStateIcon: Bool = true,
+        menuBarShowActiveBadge: Bool = true,
+        menuBarShowBlockedBadge: Bool = true,
+        menuBarShowErrorBadge: Bool = true,
+        menuBarShowTempWarnIcon: Bool = true,
+        menuBarShowAlertIcon: Bool = true
     ) {
         self.softBatteryPercent = softBatteryPercent
         self.hardBatteryPercent = hardBatteryPercent
@@ -125,6 +166,13 @@ public struct Setting: Codable, Sendable, Equatable {
         self.isThermalGuardOn = isThermalGuardOn
         self.sustainedHeatSecond = sustainedHeatSecond
         self.holdSecond = holdSecond
+        self.activeHoldExpiresAt = activeHoldExpiresAt
+        self.menuBarShowStateIcon = menuBarShowStateIcon
+        self.menuBarShowActiveBadge = menuBarShowActiveBadge
+        self.menuBarShowBlockedBadge = menuBarShowBlockedBadge
+        self.menuBarShowErrorBadge = menuBarShowErrorBadge
+        self.menuBarShowTempWarnIcon = menuBarShowTempWarnIcon
+        self.menuBarShowAlertIcon = menuBarShowAlertIcon
     }
 
     /// Decoded field by field with a fallback per key.
@@ -158,6 +206,19 @@ public struct Setting: Codable, Sendable, Equatable {
             ?? fallback.sustainedHeatSecond
         holdSecond = try container.decodeIfPresent(Int.self, forKey: .holdSecond)
             ?? fallback.holdSecond
+        activeHoldExpiresAt = try container.decodeIfPresent(Date.self, forKey: .activeHoldExpiresAt)
+        menuBarShowStateIcon = try container.decodeIfPresent(Bool.self, forKey: .menuBarShowStateIcon)
+            ?? fallback.menuBarShowStateIcon
+        menuBarShowActiveBadge = try container.decodeIfPresent(Bool.self, forKey: .menuBarShowActiveBadge)
+            ?? fallback.menuBarShowActiveBadge
+        menuBarShowBlockedBadge = try container.decodeIfPresent(Bool.self, forKey: .menuBarShowBlockedBadge)
+            ?? fallback.menuBarShowBlockedBadge
+        menuBarShowErrorBadge = try container.decodeIfPresent(Bool.self, forKey: .menuBarShowErrorBadge)
+            ?? fallback.menuBarShowErrorBadge
+        menuBarShowTempWarnIcon = try container.decodeIfPresent(Bool.self, forKey: .menuBarShowTempWarnIcon)
+            ?? fallback.menuBarShowTempWarnIcon
+        menuBarShowAlertIcon = try container.decodeIfPresent(Bool.self, forKey: .menuBarShowAlertIcon)
+            ?? fallback.menuBarShowAlertIcon
     }
 
     /// Clamp anything a hand-edited config file could get wrong. A soft floor below
@@ -178,6 +239,7 @@ public struct Setting: Codable, Sendable, Equatable {
         // Snapped *before* clamping would let 100s round to 0 and then clamp up to the
         // minimum, which is fine, but snapping after keeps every reachable value a real
         // multiple of the step — the slider and a hand-edited file agree on the grid.
+        // Clamp to 6h max (J6): any persisted value above 6h is brought down.
         copy.holdSecond = Self.snappedHold(holdSecond)
         return copy
     }

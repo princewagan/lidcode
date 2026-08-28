@@ -84,10 +84,39 @@ public struct ThermalReading: Codable, Sendable, Equatable {
     /// Defaulted in the initializer, and optional for `Codable`, so older `state.json`
     /// and every existing `ThermalReading(level:)` call site keep working untouched.
     public var celsius: Double?
+    /// True when the last successful temperature read was more than 30 seconds ago.
+    /// Set by `LidCodeRuntime.makeSnapshot()` from `lastThermalAt`.
+    /// Always false when `celsius` is nil (sensor simply unavailable, not stale).
+    public var isCelsiusStale: Bool
 
-    public init(level: ThermalLevel, celsius: Double? = nil) {
+    public init(level: ThermalLevel, celsius: Double? = nil, isCelsiusStale: Bool = false) {
         self.level = level
         self.celsius = celsius
+        self.isCelsiusStale = isCelsiusStale
+    }
+
+    // MARK: - Codable (manual to keep isCelsiusStale backward-compatible)
+    //
+    // `ThermalReading` is written to `state.json` by older app versions that did not have
+    // `isCelsiusStale`. Synthesized decoding would fail on the missing key; `decodeIfPresent`
+    // with a sensible default keeps both old and new files readable.
+
+    private enum CodingKeys: String, CodingKey {
+        case level, celsius, isCelsiusStale
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        level = try container.decode(ThermalLevel.self, forKey: .level)
+        celsius = try container.decodeIfPresent(Double.self, forKey: .celsius)
+        isCelsiusStale = try container.decodeIfPresent(Bool.self, forKey: .isCelsiusStale) ?? false
+    }
+
+    public func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(level, forKey: .level)
+        try container.encodeIfPresent(celsius, forKey: .celsius)
+        try container.encode(isCelsiusStale, forKey: .isCelsiusStale)
     }
 
     /// "52°" when the die temperature is known, the level's word when it is not.
