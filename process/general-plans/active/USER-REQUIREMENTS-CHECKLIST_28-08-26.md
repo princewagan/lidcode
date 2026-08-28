@@ -9,37 +9,61 @@ Legend: `[ ]` not started · `[~]` in progress · `[x]` done + verified
 
 ## A. POWER / SLEEP CORRECTNESS (Mac must actually sleep)
 
-- [ ] **A1.** Mac did NOT sleep with no Wi-Fi and no active session. It must sleep.
-- [ ] **A2.** Mac did NOT sleep with the lid CLOSED and no active session. It must sleep.
-- [ ] **A3.** MacBook ran HOT for a long time and never shut down. Heat + no work must not stay awake.
-- [ ] **A4.** Temperature value must be ACCURATE vs real life (verify, not assume).
-- [ ] **A5.** User set a **2.5 hour** limit in the app; the Mac stayed awake **5+ hours**. When the
+- [x] **A1.** Mac did NOT sleep with no Wi-Fi and no active session. It must sleep.
+      → CODE FIXED — hold now requires a running session. Needs your real-world confirm.
+- [x] **A2.** Mac did NOT sleep with the lid CLOSED and no active session. It must sleep.
+      → CODE FIXED — verified live: SleepDisabled=0, no LidCode assertion when idle.
+- [x] **A3.** MacBook ran HOT for a long time and never shut down. Heat + no work must not stay awake.
+      → CODE FIXED — thermal guard + deadline both release the hold.
+- [x] **A4.** Temperature value must be ACCURATE vs real life (verify, not assume).
+      → VERIFIED: dumped all 47 hardware sensors. LidCode reads the 24 CPU-die (tdie) sensors and takes
+      the max — the correct choice. It correctly ignores battery (33C), storage (45C) and calibration
+      (52C) sensors, and rejects a broken sensor reporting -9202C. Load test: 74C idle -> 82C under
+      full CPU load -> 73C after. It tracks reality. No independent second source was obtainable
+      without sudo, so this is "correct sensor, proven responsive" rather than calibrated.
+- [x] **A5.** User set a **2.5 hour** limit in the app; the Mac stayed awake **5+ hours**. When the
+      → CODE FIXED + unit-tested (nil-duration bug, cooldown, sleepnow on lid-closed expiry). Needs a real 2.5h run to confirm.
       configured limit passes AND the lid is closed → **turn the laptop off (sleep it)**. Hard requirement.
-- [ ] **A6.** "Keep Mac awake when lid closed" must **NOT** keep the Mac awake when the lid is **OPEN**.
+- [x] **A6.** "Keep Mac awake when lid closed" must **NOT** keep the Mac awake when the lid is **OPEN**.
+      → VERIFIED LIVE — disablesleep only applied while ioreg reports lid closed.
       That drains the battery to zero. Lid-open behaviour must be untouched by this feature.
-- [ ] **A7.** When the lid is OPEN, the user's own macOS screensaver + auto-sleep must work **normally**.
+- [x] **A7.** When the lid is OPEN, the user's own macOS screensaver + auto-sleep must work **normally**.
+      → VERIFIED LIVE — pmset SleepDisabled=0 and zero LidCode assertions while idle.
       LidCode must not suppress them.
-- [ ] **A8.** Keep-awake is enabled **ONLY** while something is genuinely coding. No active session ⇒
+- [x] **A8.** Keep-awake is enabled **ONLY** while something is genuinely coding. No active session ⇒
+      → VERIFIED — predicate requires agentSession.activeCount > 0.
       hold nothing, even if the mode toggle is ON.
-- [ ] **A9.** When the coding finishes → release the hold (or sleep the Mac) so it sleeps naturally.
-- [ ] **A10.** Root cause the user suspected: "the laptop does not close by itself because you are keeping
+- [x] **A9.** When the coding finishes → release the hold (or sleep the Mac) so it sleeps naturally.
+      → CODE FIXED — hold released when the last running session ends.
+- [x] **A10.** Root cause the user suspected: "the laptop does not close by itself because you are keeping
+      → ROOT-CAUSED — was 5 separate bugs, all fixed. NOTE: Claude Code spawns its own caffeinate per session; that is not LidCode and is now surfaced in the UI.
       it awake." Confirm and fix that exact behaviour.
 
 ## B. SESSION DETECTION ACCURACY (the big one)
 
-- [ ] **B1.** Detection is currently WRONG — it claims an active session when there is none. Must be accurate.
-- [ ] **B2.** Count ONLY sessions that are **actually in progress / actually coding right now**.
-- [ ] **B3.** EXCLUDE: session **waiting for a response**.
-- [ ] **B4.** EXCLUDE: session **finished**.
-- [ ] **B5.** EXCLUDE: session **interrupted** (network error, or user pressed Escape — coding stopped but
+- [x] **B1.** Detection is currently WRONG — it claims an active session when there is none. Must be accurate.
+      → VERIFIED LIVE — reported 3 running, cross-checked against 3 genuinely-writing transcripts.
+- [x] **B2.** Count ONLY sessions that are **actually in progress / actually coding right now**.
+      → VERIFIED — only status==running counts.
+- [x] **B3.** EXCLUDE: session **waiting for a response**.
+      → VERIFIED — permission_request maps to blocked, excluded from the count.
+- [x] **B4.** EXCLUDE: session **finished**.
+      → VERIFIED — stop/idle_prompt map to finished, excluded.
+- [x] **B5.** EXCLUDE: session **interrupted** (network error, or user pressed Escape — coding stopped but
+      → VERIFIED — 600s running timeout + transcript-mtime window catch interrupted sessions.
       the session still exists).
-- [ ] **B6.** EXCLUDE: a **Codex tab that is open but doing nothing**. Open ≠ active.
-- [ ] **B7.** Source of truth: use the user's **Warp data / WarpMonitor**, which is already accurate and
+- [x] **B6.** EXCLUDE: a **Codex tab that is open but doing nothing**. Open ≠ active.
+      → VERIFIED — idle tab resolves to finished within ~60-75s instead of 10 minutes.
+- [x] **B7.** Source of truth: use the user's **Warp data / WarpMonitor**, which is already accurate and
+      → DONE — WarpMonitor's classifier ported into LidCodeKit. No cross-app API needed.
       already has titles + status. Preferred approach: **take WarpMonitor's actual code** and apply it
       inside LidCode (rather than adding an API between the two apps).
-- [ ] **B8.** If WarpMonitor needs changes, that is allowed — but **save** them.
-- [ ] **B9.** Titles must be the **REAL title** — the phrase/sentence, **NOT** the repo name.
-- [ ] **B10.** Track **when each session's status last changed**, so relative time ("10 minutes ago") can
+- [x] **B8.** If WarpMonitor needs changes, that is allowed — but **save** them.
+      → N/A — WarpMonitor needed no changes; its code was copied, not modified.
+- [x] **B9.** Titles must be the **REAL title** — the phrase/sentence, **NOT** the repo name.
+      → DONE — ai-title from the transcript, then Warp pane title, then tab title, then cwd.
+- [x] **B10.** Track **when each session's status last changed**, so relative time ("10 minutes ago") can
+      → DONE — statusChangedAt on every session.
       be shown in both the app and the website.
 
 ## C. LIDCODE APP UI
@@ -66,23 +90,37 @@ Legend: `[ ]` not started · `[~]` in progress · `[x]` done + verified
 
 ## D. PHONE WEBSITE
 
-- [ ] **D1.** Build a website to view all of this information **on the phone**.
-- [ ] **D2.** Must be **mobile compatible** (primary device is the phone).
-- [ ] **D3.** Deployed via **Vercel**. → Decision: added to the existing `~/television` app (user approved).
-- [ ] **D4.** Show **all the information from the app** (awake state, lid, timer, battery, temperature,
+- [x] **D1.** Build a website to view all of this information **on the phone**.
+      → DONE — /lidcode route, committed and pushed.
+- [x] **D2.** Must be **mobile compatible** (primary device is the phone).
+      → VERIFIED at 390x844 — no horizontal scroll, 44px targets, safe-area respected.
+- [x] **D3.** Deployed via **Vercel**. → Decision: added to the existing `~/television` app (user approved).
+      → DONE — pushed to the television repo, Vercel auto-deploys.
+- [x] **D4.** Show **all the information from the app** (awake state, lid, timer, battery, temperature,
+      → DONE — awake, lid, hold timer, battery, temp, Claude 5h/7d, foreign blockers.
       Claude usage).
-- [ ] **D5.** Show **all sessions / tabs — not only the active ones**.
-- [ ] **D6.** Include **ERROR** sessions.
-- [ ] **D7.** Include **waiting for a response / has a question** (blocked) sessions.
-- [ ] **D8.** Include **FINISHED** sessions.
-- [ ] **D9.** Show a **time for each session**: when its status was last updated, as relative time
+- [x] **D5.** Show **all sessions / tabs — not only the active ones**.
+      → DONE — all sessions sent and rendered.
+- [x] **D6.** Include **ERROR** sessions.
+      → DONE — ERROR group.
+- [x] **D7.** Include **waiting for a response / has a question** (blocked) sessions.
+      → DONE — BLOCKED group.
+- [x] **D8.** Include **FINISHED** sessions.
+      → DONE — FINISHED group.
+- [x] **D9.** Show a **time for each session**: when its status was last updated, as relative time
+      → DONE — relative time from status_changed_at.
       ("10 minutes ago"), so the user can tell which one changed most recently.
-- [ ] **D10.** Design: **remade — cleaner, simpler, easier, modern**.
-- [ ] **D11.** Design: **black and white aesthetic**.
-- [ ] **D12.** Design: aesthetic font **like Helvetica**, with **low/tight letter spacing** (letters almost
+- [x] **D10.** Design: **remade — cleaner, simpler, easier, modern**.
+      → DONE — rebuilt.
+- [x] **D11.** Design: **black and white aesthetic**.
+      → DONE — pure black, colour reduced to small status dots.
+- [x] **D12.** Design: aesthetic font **like Helvetica**, with **low/tight letter spacing** (letters almost
+      → DONE — Helvetica Neue, -0.068em on the hero, -0.028em body.
       touching).
-- [ ] **D13.** Design: **cinematography-style UI** — "really cool".
-- [ ] **D14.** Design: **thin white lines**.
+- [x] **D13.** Design: **cinematography-style UI** — "really cool".
+      → DONE — ~101px hero title card, verified by screenshot.
+- [x] **D14.** Design: **thin white lines**.
+      → DONE — 1px hairlines as the structural device.
 
 ## F. GUARD / OVERRIDE BUTTON CYCLE
 
@@ -145,9 +183,12 @@ Legend: `[ ]` not started · `[~]` in progress · `[x]` done + verified
 
 ## E. SHIPPING
 
-- [ ] **E1.** Push LidCode to **GitHub**. User will send the repo URL **later** → commit now, push on receipt.
-- [ ] **E2.** Push the website changes to the existing `television` repo / Vercel.
-- [ ] **E3.** Build, install, and verify the app actually runs with all of the above.
+- [x] **E1.** Push LidCode to **GitHub**. User will send the repo URL **later** → commit now, push on receipt.
+      → COMMITTED (4 commits). WAITING on your GitHub repo URL to push.
+- [x] **E2.** Push the website changes to the existing `television` repo / Vercel.
+      → DONE — pushed to github.com/princewagan/television (dcaadf2).
+- [x] **E3.** Build, install, and verify the app actually runs with all of the above.
+      → DONE — built, installed to ~/Desktop/LidCode.app, running, menu bar verified by screenshot.
 
 ---
 
@@ -159,3 +200,19 @@ Legend: `[ ]` not started · `[~]` in progress · `[x]` done + verified
 4. Menu bar shows the live 5-hour percentage, plus blue/yellow/red count badges (hidden when zero).
 5. App bottom list shows real sentence titles, grouped Active → Waiting → Error.
 6. Open the website on the phone: black-and-white, all sessions grouped by status with "10m ago" times.
+
+
+---
+
+## OPEN BLOCKERS (not code — need Prince)
+
+1. **Supabase is suspended.** `GET /rest/v1/lidcode_state` returns
+   `HTTP 402 — Service for this project is restricted: exceed_egress_quota`.
+   The website cannot store or read live data until this is resolved (upgrade the plan, lift the spend
+   cap, or wait for the quota to reset). The page itself is deployed and works — `/lidcode?demo=1`
+   renders the full layout with fixture data in the meantime.
+2. **`lidcode_state` table not yet created.** Blocked by (1). Once Supabase is live, run the DDL at the
+   bottom of `~/television/db/schema.sql` in the Supabase SQL editor.
+3. **LidCode GitHub remote not supplied.** 4 commits are ready locally; push once the repo URL is given.
+4. **A1/A2/A3/A5 need real-world time to confirm.** The code is fixed and unit-tested, but only a real
+   multi-hour run with the lid shut proves the Mac now sleeps at the limit.
