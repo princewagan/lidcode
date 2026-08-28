@@ -1,233 +1,156 @@
 import SwiftUI
 import LidCodeKit
 
-/// The one place colour is decided, so a green dot in the health list and a green
-/// ring at the top of the panel always mean the same thing.
+/// One colour family for the whole panel.
+///
+/// The version this replaces used seven hues at once — green rings, a teal thermal step,
+/// blue for a running timer, indigo in the power button, amber warnings, red floors, a
+/// yellow unknown. Every one of them was individually defensible and together they made a
+/// 340pt panel read as a dashboard: with everything coloured, colour stopped meaning
+/// anything, and the eye had no idea where to land first.
+///
+/// So the panel now draws in a single orange, and the *only* thing colour encodes is
+/// severity — how close a reading is to ending your hold. That is expressed as depth
+/// within the family rather than a change of hue:
+///
+///   `brandSoft`  fine, or stale/idle — present but not asking for you
+///   `brand`      the normal, live, working colour
+///   `brandDeep`  danger: the thing that is about to stop the Mac
+///
+/// Danger deliberately stays legible. Flattening a 4% battery into the same orange as a
+/// 90% one would be a prettier panel that fails at the one job it has, so the thresholds
+/// below are unchanged from the multi-hue version — only the colours they return moved.
 enum Palette {
+    /// Claude orange, #D97757. The brand colour, and the panel's normal state.
+    static let brand = Color(red: 0.85, green: 0.47, blue: 0.34)
+    /// The hot end of the same pigment. Reads as "worse" next to `brand` without leaving
+    /// the family — which is what keeps a critical battery from disappearing into the
+    /// decoration while still not introducing a second hue.
+    static let brandDeep = Color(red: 0.76, green: 0.37, blue: 0.24)
+    /// Muted brand: healthy, idle, or stale. Same colour, quieter, so a panel with nothing
+    /// wrong is visually calm rather than blank.
+    static let brandSoft = brand.opacity(0.55)
+    /// The unfilled part of every bar. Deliberately `primary`, not the brand — a tinted
+    /// track competes with its own fill and makes short bars unreadable.
+    static let track = Color.primary.opacity(0.10)
+    /// "No reading", which is not a severity and so must not be orange. Grey is hue-free,
+    /// so it cannot be mistaken for a position on the scale above.
+    static let unknown = Color.secondary.opacity(0.45)
+
     static func color(for state: HealthState) -> Color {
         switch state {
-        case .ok:       return .green
-        case .degraded: return .orange
-        case .down:     return .red
-        case .unknown:  return .yellow
-        case .off:      return .secondary
+        case .ok:       return brandSoft
+        case .degraded: return brand
+        case .down:     return brandDeep
+        case .unknown:  return unknown
+        case .off:      return unknown
         }
     }
 
     static func color(for level: ThermalLevel) -> Color {
         switch level {
-        case .nominal:  return .green
-        case .fair:     return .teal
-        case .serious:  return .orange
-        case .critical: return .red
+        case .nominal:  return brandSoft
+        case .fair:     return brandSoft
+        case .serious:  return brand
+        case .critical: return brandDeep
         }
     }
 
-    /// Rate-limit colour. Green up to 70%, amber to 90%, red past it.
+    /// Rate-limit colour. Quiet up to 70%, brand to 90%, deep past it.
     ///
     /// Fixed thresholds rather than ones derived from a setting, because unlike the battery
     /// floors these are not ours to move: the ceiling is Anthropic's, and hitting it stops
     /// the work regardless of what this app thinks. The bands only say how much runway is
     /// left before that happens.
     static func usageColor(percent: Double) -> Color {
-        if percent >= 90 { return .red }
-        if percent >= 70 { return .orange }
-        return .green
+        if percent >= 90 { return brandDeep }
+        if percent >= 70 { return brand }
+        return brandSoft
     }
 
-    /// Battery colour tracks the floors, not an arbitrary 20/50 split — the ring goes
-    /// amber exactly when the soft floor is the next thing that will happen.
+    /// Battery colour tracks the floors, not an arbitrary 20/50 split — the bar deepens
+    /// exactly when the soft floor is the next thing that will happen.
     static func batteryColor(percent: Int?, setting soft: Int, hard: Int, isOnMain: Bool) -> Color {
-        guard let percent else { return .secondary }
-        if isOnMain { return .green }
-        if percent <= hard { return .red }
-        if percent <= soft { return .orange }
-        return .green
+        guard let percent else { return unknown }
+        if isOnMain { return brandSoft }
+        if percent <= hard { return brandDeep }
+        if percent <= soft { return brand }
+        return brandSoft
     }
 }
 
-/// A donut with a value in the middle. The shape from the reference screenshots, at
-/// menu-bar scale.
+/// A labelled horizontal bar: name, track, number. The panel's only gauge.
 ///
-/// The centre is a `Content`, not a free string, because the first build let any label
-/// through and "Very hot" promptly rendered straight over the stroke. A ring this size
-/// has roughly 44pt of usable width inside the track: numbers fit, words do not. So a
-/// measurement gets `.number`, and a *state* gets `.symbol` with the word moved to the
-/// caption underneath, where there is room for it.
-struct RingGauge: View {
-    enum Content {
-        case number(String, unit: String?)
-        case symbol(String)
-    }
-
+/// This replaced five radial rings. Rings look impressive and are the wrong shape for this
+/// data: a ring needs ~62pt of height to say what a 6pt bar says, it forces the value into
+/// a 44pt hole where a two-digit number is the *most* that fits (which is why the old
+/// countdown quietly rescaled its own type), and a row of them reads as a car dashboard —
+/// five equally loud circles, none of which is the thing you opened the panel for.
+///
+/// Bars stack, so four readings cost less vertical space than three rings did, and they
+/// share a baseline grid: the fixed label and value columns mean every number in the panel
+/// sits in the same place, which is what makes the set scannable in one pass instead of
+/// four. Comparison between rows becomes free — the eye reads the fill edges as a column.
+struct BarGauge: View {
+    var label: String
+    /// 0...1. Clamped here rather than trusted, because a NaN from a division upstream
+    /// would otherwise crash layout rather than draw an empty bar.
     var fraction: Double
     var color: Color
-    var content: Content
-    var caption: String
-    var diameter: CGFloat = 62
-    var lineWidth: CGFloat = 6
+    /// Already formatted, including its unit. Short — this column is two or three glyphs
+    /// wide by design, and anything longer belongs in `.help`.
+    var value: String
 
-    /// The square that fits inside the track, minus a hair of breathing room.
-    private var innerWidth: CGFloat { diameter - (lineWidth * 2) - 6 }
+    /// Wide enough for "Battery" and "5-hour" at 10pt, and fixed so all four bars start at
+    /// the same x. A self-sizing label would let a one-character change in one row shift
+    /// the track of that row only, which destroys the column the layout is built on.
+    private static let labelWidth: CGFloat = 52
+    /// Fits "100%" with the digits monospaced. Trailing-aligned so the unit stays put as
+    /// the number grows from one digit to three.
+    private static let valueWidth: CGFloat = 40
+    private static let barHeight: CGFloat = 6
+    private static let corner: CGFloat = 3
+    /// The row's height is fixed for the same reason everything else in this panel is: the
+    /// window resizes itself to its content, so a row that grows by a point moves the whole
+    /// panel under the pointer.
+    private static let rowHeight: CGFloat = 14
+
+    private var clamped: Double {
+        guard fraction.isFinite else { return 0 }
+        return min(1, max(0, fraction))
+    }
 
     var body: some View {
-        VStack(spacing: 5) {
-            ZStack {
-                Circle()
-                    .stroke(Color.secondary.opacity(0.22), lineWidth: lineWidth)
-                Circle()
-                    .trim(from: 0, to: max(0.001, min(1, fraction)))
-                    .stroke(color, style: StrokeStyle(lineWidth: lineWidth, lineCap: .round))
-                    // Start the fill at 12 o'clock instead of 3.
-                    .rotationEffect(.degrees(-90))
-
-                center
-                    // Boxed on **both** axes. Width alone let the content keep its
-                    // intrinsic height, so when `minimumScaleFactor` shrank a too-wide
-                    // label the baseline-aligned row got shorter and the glyph drifted
-                    // vertically. A fixed box centres whatever it is given, so a rescale
-                    // can no longer move anything.
-                    .frame(width: innerWidth, height: innerWidth)
-            }
-            .frame(width: diameter, height: diameter)
-
-            // No `minimumScaleFactor` here, deliberately. This caption sits in a
-            // *flexible* frame, so scaling let SwiftUI answer "not quite enough width"
-            // by shrinking the type — and every disclosure below re-ran layout, so
-            // expanding a section visibly resized text at the top of the panel.
-            // Truncation is the honest failure mode: the caption either fits or it
-            // ellipsises, but it never changes size under you.
-            Text(caption)
-                .font(.system(size: 9))
-                .foregroundStyle(.secondary)
-                .lineLimit(1)
-                .truncationMode(.tail)
-                .frame(maxWidth: diameter + 22)
-        }
-        .frame(maxWidth: .infinity)
-    }
-
-    @ViewBuilder
-    private var center: some View {
-        switch content {
-        case .number(let value, let unit):
-            HStack(alignment: .firstTextBaseline, spacing: 1) {
-                Text(value)
-                    .font(.system(size: 17, weight: .semibold, design: .rounded))
-                    .monospacedDigit()
-                if let unit {
-                    Text(unit)
-                        .font(.system(size: 9, weight: .medium))
-                        .foregroundStyle(.secondary)
-                }
-            }
-            // Safe to scale, unlike the caption: this sits in a *fixed* frame, so it
-            // only ever responds to its own content ("100%") and never to how much
-            // room the rest of the panel is using.
-            .lineLimit(1)
-            .minimumScaleFactor(0.6)
-
-        case .symbol(let name):
-            Image(systemName: name)
-                .font(.system(size: 20, weight: .medium))
-                .foregroundStyle(color)
-        }
-    }
-}
-
-/// A progress bar broken into ticks, so a glance reads as "about two thirds" without
-/// having to measure a smooth bar against its container.
-struct SegmentBar: View {
-    var fraction: Double
-    var color: Color
-    var segmentCount: Int = 24
-    var height: CGFloat = 6
-
-    var body: some View {
-        let filled = Int((Double(segmentCount) * min(1, max(0, fraction))).rounded())
-        HStack(spacing: 2) {
-            ForEach(0..<segmentCount, id: \.self) { index in
-                RoundedRectangle(cornerRadius: 1.5, style: .continuous)
-                    .fill(index < filled ? color : Color.secondary.opacity(0.18))
-            }
-        }
-        .frame(height: height)
-    }
-}
-
-/// Bar sparkline over recent samples. Bars, not a line: the underlying series is a
-/// count of leases, which is a step function — drawing it as a smooth curve would
-/// imply values it never had.
-struct Sparkline: View {
-    var value: [Double]
-    var color: Color
-    var barCount: Int
-    var height: CGFloat = 26
-
-    var body: some View {
-        let series = padded
-        let peak = max(series.max() ?? 1, 1)
-        HStack(alignment: .bottom, spacing: 1) {
-            ForEach(Array(series.enumerated()), id: \.offset) { _, sample in
-                RoundedRectangle(cornerRadius: 1, style: .continuous)
-                    .fill(sample > 0 ? color : Color.secondary.opacity(0.16))
-                    .frame(height: max(2, CGFloat(sample / peak) * height))
-            }
-        }
-        .frame(height: height, alignment: .bottom)
-    }
-
-    /// Left-pad with zeros so a fresh session's three samples sit at the right-hand
-    /// edge and grow leftward, instead of stretching three fat bars across the strip.
-    private var padded: [Double] {
-        guard value.count < barCount else { return Array(value.suffix(barCount)) }
-        return Array(repeating: 0, count: barCount - value.count) + value
-    }
-}
-
-/// A single answered check.
-struct HealthRow: View {
-    var check: HealthCheck
-
-    var body: some View {
-        HStack(alignment: .firstTextBaseline, spacing: 6) {
-            Image(systemName: check.state.symbolName)
-                .font(.system(size: 9))
-                .foregroundStyle(Palette.color(for: check.state))
-                .frame(width: 11)
-            Text(check.label)
-                .font(.system(size: 11))
-                .frame(width: 96, alignment: .leading)
-            Text(check.detail)
+        HStack(spacing: 8) {
+            Text(label)
                 .font(.system(size: 10))
                 .foregroundStyle(.secondary)
                 .lineLimit(1)
-                .truncationMode(.middle)
-            Spacer(minLength: 2)
-            if let millisecond = check.latencyMillisecond {
-                Text("\(millisecond)ms")
-                    .font(.system(size: 9).monospacedDigit())
-                    .foregroundStyle(.tertiary)
+                .frame(width: Self.labelWidth, alignment: .leading)
+
+            // `GeometryReader` rather than a fraction-of-parent trick: the track has to be
+            // whatever is left after two fixed columns, and that width is only knowable
+            // here. It takes the offered width and is pinned to `barHeight` vertically, so
+            // it cannot influence the row's height.
+            GeometryReader { geometry in
+                ZStack(alignment: .leading) {
+                    RoundedRectangle(cornerRadius: Self.corner, style: .continuous)
+                        .fill(Palette.track)
+                    RoundedRectangle(cornerRadius: Self.corner, style: .continuous)
+                        .fill(color)
+                        // No minimum width. An empty bar means zero, and a 3pt sliver of
+                        // colour at zero would be the gauge lying to keep itself visible.
+                        .frame(width: geometry.size.width * clamped)
+                }
             }
-        }
-    }
-}
+            .frame(height: Self.barHeight)
 
-/// The group header — name on the left, worst-in-group verdict on the right.
-struct HealthPill: View {
-    var title: String
-    var state: HealthState
-
-    var body: some View {
-        HStack(spacing: 5) {
-            Circle()
-                .fill(Palette.color(for: state))
-                .frame(width: 6, height: 6)
-            Text(title.uppercased())
-                .font(.system(size: 9, weight: .semibold))
-                .foregroundStyle(.secondary)
-                .kerning(0.4)
+            Text(value)
+                .font(.system(size: 10, weight: .medium).monospacedDigit())
+                .lineLimit(1)
+                .frame(width: Self.valueWidth, alignment: .trailing)
         }
+        .frame(height: Self.rowHeight)
     }
 }
 

@@ -50,6 +50,17 @@ final class MenuPanelController: NSObject, NSWindowDelegate {
     /// `topLeft(for:button:)`, so *any* width change becomes a horizontal jump. Fixing the
     /// width removes the input to that sum.
     private static let width: CGFloat = 340
+    /// Fallback height when the SwiftUI layout engine has not yet measured the content.
+    ///
+    /// This used to be a hard `return` that aborted the entire layout pass, leaving the
+    /// panel at its last stale frame. After a sleep/wake or display disconnect, that
+    /// stale frame is very likely off-screen, so `panel.isVisible` becomes true (the
+    /// window is "on screen" at coordinates no display covers) and every subsequent click
+    /// calls `close()` instead of `show()`. To the user the icon simply stops working.
+    ///
+    /// Using a sensible default lets `show()` position the panel correctly even before
+    /// the first layout pass completes — the content will resize it immediately after.
+    private static let defaultHeight: CGFloat = 420
 
     /// Where the panel's top-left corner sits, decided once when it opens.
     ///
@@ -127,9 +138,35 @@ final class MenuPanelController: NSObject, NSWindowDelegate {
 
     // MARK: - Showing
 
+    /// The primary entry point from the status-item button.
+    ///
+    /// This is the safety net for the "clicking does nothing" bug that surfaces after
+    /// sleep/wake or a display disconnect. The symptom is:
+    ///
+    ///   1. Panel was open when the lid shut (or the display disconnected).
+    ///   2. Sleep moved it off-screen at the old coordinates.
+    ///   3. `panel.isVisible` returns `true` because the window is technically
+    ///      on screen — just at coordinates no physical display covers.
+    ///   4. Every click goes to `close()` instead of `show()`. Icon appears dead.
+    ///
+    /// The fix: before routing, check whether a "visible" panel actually intersects any
+    /// screen. If it does not, treat it as not-visible, close it (which resets
+    /// `pinnedTopLeft`), and immediately re-show it at a freshly computed position.
     func toggle(relativeTo button: NSStatusBarButton?) {
         if panel.isVisible {
-            close()
+            // Validate that the panel is actually on a screen the user can see.
+            // An off-screen panel must be healed rather than simply toggled closed,
+            // because the user's intent was to open it, not to close a ghost.
+            if !panelIntersectsAnyScreen() {
+                // Silent close — skip the `closedAt` stamp so the re-open below is
+                // not gated by the 0.2 s bounce guard.
+                removeDismissMonitor()
+                pinnedTopLeft = nil
+                panel.orderOut(nil)
+                show(relativeTo: button)
+            } else {
+                close()
+            }
         } else if Date().timeIntervalSince(closedAt) > 0.2 {
             show(relativeTo: button)
         }
@@ -139,6 +176,25 @@ final class MenuPanelController: NSObject, NSWindowDelegate {
         // Placement is decided here and only here, while the panel is still hidden.
         pinnedTopLeft = nil
         layout(anchoredTo: button, animated: false)
+
+        // Last-resort clamp: if the frame still does not intersect any screen after
+        // layout, force it to the top-right of the main screen before ordering front.
+        // This handles the edge case where the SwiftUI fitting size was still zero at
+        // the time of layout — the panel would have been placed at the default height
+        // fallback, but the mainScreen check here catches any remaining gap.
+        if !panelIntersectsAnyScreen() {
+            let screen = NSScreen.main ?? NSScreen.screens.first
+            if let screen {
+                let x = screen.visibleFrame.maxX - Self.width - Self.screenInset
+                let y = screen.visibleFrame.maxY - Self.menuBarGap
+                let fallbackFrame = PanelGeometry.frame(
+                    topLeft: NSPoint(x: x, y: y),
+                    width: Self.width,
+                    height: Self.defaultHeight)
+                panel.setFrame(fallbackFrame, display: false)
+            }
+        }
+
         // An accessory app is not active by default, so without this the panel opens
         // behind the frontmost window and loses key on the first click inside it.
         NSApp.activate(ignoringOtherApps: true)
@@ -171,6 +227,20 @@ final class MenuPanelController: NSObject, NSWindowDelegate {
         layout(anchoredTo: button, animated: true)
     }
 
+    /// Clears the pinned position and closes if currently visible, so the next open
+    /// re-derives placement against the current screen set.
+    ///
+    /// Called by the wake handler in `AppDelegate`. After a sleep/wake the screen
+    /// geometry may have changed (different resolution, reconnected external display,
+    /// or the built-in panel back on after an external was unplugged), so the old
+    /// pinned position is stale by definition.
+    func invalidatePlacement() {
+        pinnedTopLeft = nil
+        if panel.isVisible {
+            panel.orderOut(nil)
+        }
+    }
+
     private func layout(anchoredTo button: NSStatusBarButton?, animated: Bool) {
         // Flush pending layout before measuring. The resize is driven by
         // `objectWillChange`, which fires *before* the change lands, so without this the
@@ -178,20 +248,33 @@ final class MenuPanelController: NSObject, NSWindowDelegate {
         // height while the content is already the new one.
         hosting.layoutSubtreeIfNeeded()
 
-        let height = hosting.fittingSize.height
-        guard height > 0 else { return }
+        // Use the measured height when available, but fall back to a sensible default
+        // rather than aborting the layout. The old `guard height > 0 else { return }`
+        // was the root of the "clicking does nothing" bug: if `show()` was called while
+        // the SwiftUI layout engine had not yet measured (common on the first open after
+        // a wake), the panel frame was never updated and the panel ordered front at
+        // whatever stale off-screen coordinates it last had.
+        let rawHeight = hosting.fittingSize.height
+        let height = rawHeight > 0 ? rawHeight : Self.defaultHeight
+
         let size = NSSize(width: Self.width, height: height)
 
         let topLeft: NSPoint
         if let pinnedTopLeft {
             topLeft = pinnedTopLeft
         } else {
-            guard let computed = self.topLeft(for: size, button: button) else { return }
+            let computed = self.topLeft(for: size, button: button)
             topLeft = computed
             pinnedTopLeft = computed
         }
 
-        let frame = PanelGeometry.frame(topLeft: topLeft, width: size.width, height: size.height)
+        var frame = PanelGeometry.frame(topLeft: topLeft, width: size.width, height: size.height)
+
+        // Clamp the frame so it is guaranteed to intersect a visible screen. This
+        // defends against a placement derived from a button rect or a mouse position
+        // that was valid on a since-disconnected display.
+        frame = clampedToScreen(frame)
+
         guard frame != panel.frame else { return }
 
         // Set, never animate.
@@ -208,10 +291,18 @@ final class MenuPanelController: NSObject, NSWindowDelegate {
 
     // MARK: - Placement
 
-    /// Where the panel's top-left corner goes, or nil when there is nowhere to put it —
-    /// see `activeScreen`. Height is deliberately not a parameter: the panel hangs from
-    /// this point downward, so how tall it happens to be cannot move it.
-    private func topLeft(for size: NSSize, button: NSStatusBarButton?) -> NSPoint? {
+    /// Where the panel's top-left corner goes.
+    ///
+    /// This method NEVER returns nil — the previous optional return type was the source
+    /// of the off-screen panel bug. When `topLeft(for:button:)` returned nil, `show()`
+    /// still called `panel.makeKeyAndOrderFront(nil)`, placing the panel at whatever
+    /// stale frame it last had. After a sleep/wake that stale frame was off-screen, so
+    /// every subsequent click reached the `close()` branch and the icon appeared dead.
+    ///
+    /// The hard fallback at the bottom always produces a point, so the caller gets
+    /// a valid placement even when there are no screens at all (lid shut, no external
+    /// display — this app's whole raison d'être).
+    private func topLeft(for size: NSSize, button: NSStatusBarButton?) -> NSPoint {
         if let anchor = anchorRect(for: button), let screen = screen(containing: anchor) {
             // Centred under the icon, then pushed back inside the screen — an item near
             // the right edge would otherwise hang half of the panel into nothing.
@@ -228,10 +319,58 @@ final class MenuPanelController: NSObject, NSWindowDelegate {
         // under the notch, or the status item has no window yet. Hang the panel from
         // the top-right of the active screen, which is where a hidden item's owner
         // would have been anyway.
-        guard let screen = activeScreen() else { return nil }
-        return NSPoint(
-            x: screen.visibleFrame.maxX - size.width - Self.screenInset,
-            y: screen.visibleFrame.maxY - Self.menuBarGap)
+        if let screen = activeScreen() {
+            return NSPoint(
+                x: screen.visibleFrame.maxX - size.width - Self.screenInset,
+                y: screen.visibleFrame.maxY - Self.menuBarGap)
+        }
+
+        // Absolute last resort: no NSScreen at all. This happens when the lid is shut
+        // and there is no external display — which is precisely the scenario LidCode
+        // manages. Rather than returning nil (which forced the panel to stay at its stale
+        // off-screen frame), produce a point derived from the main display bounds via
+        // CoreGraphics, which is available even when AppKit reports no screens.
+        //
+        // The coordinates below place the panel in the top-right area of the main
+        // display. If even `CGDisplayBounds` is unavailable, fall back to a hard-coded
+        // point that is always on a typical display.
+        let mainBounds = CGDisplayBounds(CGMainDisplayID())
+        if mainBounds.width > 0 {
+            return NSPoint(
+                x: mainBounds.maxX - size.width - Self.screenInset,
+                y: mainBounds.maxY - Self.menuBarGap)
+        }
+        return NSPoint(x: 100, y: 800)
+    }
+
+    /// Adjusts `frame` so it intersects at least one visible screen.
+    ///
+    /// If the frame already intersects a screen, it is returned unchanged. Otherwise
+    /// the frame's origin is recomputed against `activeScreen()` or the main screen,
+    /// preserving the panel's size. This is the safety net that catches a placement
+    /// produced from a stale button rect or a display that has since disconnected.
+    private func clampedToScreen(_ frame: NSRect) -> NSRect {
+        // Already visible on some screen — nothing to do.
+        if NSScreen.screens.contains(where: { $0.frame.intersects(frame) }) {
+            return frame
+        }
+
+        // Recompute against whichever screen the user is actually looking at.
+        let screen = activeScreen() ?? NSScreen.main ?? NSScreen.screens.first
+        guard let screen else { return frame }
+
+        let x = (screen.visibleFrame.maxX - frame.width - Self.screenInset)
+            .clamped(to: screen.visibleFrame.minX, and: screen.visibleFrame.maxX - frame.width)
+        let y = screen.visibleFrame.maxY - Self.menuBarGap
+        return PanelGeometry.frame(
+            topLeft: NSPoint(x: x, y: y),
+            width: frame.width,
+            height: frame.height)
+    }
+
+    /// Returns true if the panel's current frame intersects at least one visible screen.
+    private func panelIntersectsAnyScreen() -> Bool {
+        NSScreen.screens.contains { $0.frame.intersects(panel.frame) }
     }
 
     /// The status item's on-screen rect, or nil when it is not somewhere a panel can

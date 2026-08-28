@@ -7,22 +7,18 @@ import LidCodeKit
 @MainActor
 final class AppModel: ObservableObject {
     @Published private(set) var snapshot = RuntimeSnapshot()
-    @Published private(set) var recentEntry: [LogEntry] = []
-    @Published private(set) var recentSample: [MetricSample] = []
     @Published private(set) var setting: Setting = .default
     @Published var alert: String?
 
-    /// Which sections are open. These live here rather than as `@State` in the view
-    /// because the window has to resize itself when one opens, and the panel
-    /// controller can only see state it can subscribe to. Keeping them here also means
-    /// a section you opened is still open the next time you click the icon.
-    @Published var isAgentExpanded = false
-    @Published var isHealthExpanded = false
-    @Published var isActivityExpanded = false
+    /// Whether the settings drawer is open. This lives here rather than as `@State` in
+    /// the view because the window has to resize itself when it opens, and the panel
+    /// controller can only see state it can subscribe to. Keeping it here also means a
+    /// drawer you opened is still open the next time you click the icon.
+    ///
+    /// It is the last one. The panel used to carry four of these — agent, health,
+    /// activity, settings — and each disclosure was a section that had to be read past
+    /// to reach the switch. The other three sections are gone; see `MenuView`.
     @Published var isSettingExpanded = false
-
-    /// How many samples the sparkline draws. Also the width of the strip in bars.
-    static let sparklineSampleCount = 48
 
     /// `nonisolated` on purpose: the runtime is internally queue-confined and safe to
     /// call from any thread, and the CLI socket handler must reach it without hopping
@@ -35,10 +31,15 @@ final class AppModel: ObservableObject {
             Task { @MainActor in
                 guard let self else { return }
                 self.snapshot = snapshot
-                self.recentEntry = self.runtime.recentLog(limit: 12)
-                self.recentSample = self.runtime.recentSample(limit: Self.sparklineSampleCount)
-                // The panel draws thresholds, not just readings — a battery ring that
-                // turns amber at the soft floor has to know where the floor moved to.
+                // The log and the metric history are deliberately *not* pulled here any
+                // more. Both were copied out of the runtime on every publish — a 12-entry
+                // log and 48 samples, every 5 seconds, on the main actor, to feed an
+                // activity list and a sparkline that no longer exist. Deleting the views
+                // without deleting these would have kept the cost and lost the reason.
+                // `lidcode log` still reads the same history on demand.
+                //
+                // The panel draws thresholds, not just readings — a battery bar that
+                // deepens at the soft floor has to know where the floor moved to.
                 self.setting = self.runtime.currentSetting
                 self.refreshHelperReadiness()
             }
@@ -56,8 +57,6 @@ final class AppModel: ObservableObject {
         startServer()
         UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .sound]) { _, _ in }
         snapshot = runtime.snapshot
-        recentEntry = runtime.recentLog(limit: 12)
-        recentSample = runtime.recentSample(limit: Self.sparklineSampleCount)
         setting = runtime.currentSetting
         runtime.refreshHealth()
     }
@@ -353,5 +352,16 @@ final class AppModel: ObservableObject {
         content.body = message
         let request = UNNotificationRequest(identifier: UUID().uuidString, content: content, trigger: nil)
         UNUserNotificationCenter.current().add(request)
+    }
+
+    // MARK: - Wake recovery
+
+    /// Forwards the post-wake recovery call to the underlying runtime.
+    ///
+    /// Called from `AppDelegate.wakeUp()` after `NSWorkspace.didWakeNotification` or
+    /// `NSWorkspace.screensDidWakeNotification`. Kept here rather than in the delegate
+    /// because the runtime is a private implementation detail of AppModel.
+    func recoverAfterWake() {
+        runtime.recoverAfterWake()
     }
 }

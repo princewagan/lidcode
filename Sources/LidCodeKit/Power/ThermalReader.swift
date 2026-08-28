@@ -100,7 +100,7 @@ public struct ThermalReading: Codable, Sendable, Equatable {
 public enum ThermalReader {
     /// Shared so symbol resolution and the sensor walk happen once per process, and so
     /// the read cache is shared across every caller rather than per-instance.
-    private static let sensor = TemperatureSensor.shared
+    internal static let sensor = TemperatureSensor.shared
 
     public static func read() -> ThermalReading {
         let osLevel = ThermalLevel(ProcessInfo.processInfo.thermalState)

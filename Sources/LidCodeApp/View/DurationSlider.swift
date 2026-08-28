@@ -76,9 +76,14 @@ struct DurationSlider: View {
 
                 // Filled to the *centre* of the knob, not to its leading edge, so the fill
                 // and the knob agree about where the value is at both ends of the travel.
+                //
+                // Brand orange, deepening to the right. Blue-to-cyan was the last hue on
+                // the panel that meant nothing — the fill is not a severity, so it takes
+                // the family's normal colour and uses depth only to show direction of
+                // travel. See `Palette`.
                 Capsule(style: .continuous)
                     .fill(LinearGradient(
-                        colors: [Color.blue, Color.cyan],
+                        colors: [Palette.brand, Palette.brandDeep],
                         startPoint: .leading,
                         endPoint: .trailing))
                     .frame(width: knobX + knobDiameter)

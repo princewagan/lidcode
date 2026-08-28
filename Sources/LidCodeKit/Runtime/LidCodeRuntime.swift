@@ -840,6 +840,52 @@ public final class LidCodeRuntime: @unchecked Sendable {
         publish()
     }
 
+    // MARK: - Wake recovery
+
+    /// Re-arms sensors and the helper connection after a sleep/wake cycle.
+    ///
+    /// A sleep event can invalidate the IOHIDEventSystem service clients that
+    /// `TemperatureSensor` holds. After the wake they silently return nil forever
+    /// until the service list is discarded and rebuilt. `rescan()` does exactly that.
+    ///
+    /// The helper socket connection can also die during a hard power-off (battery
+    /// exhaustion with no graceful shutdown). `handleHelperLoss()` already clears
+    /// `isClamshellActive`, but nothing ever re-dials the socket. This method checks
+    /// whether the socket file exists but the client is disconnected and reconnects
+    /// non-blocking — the bounded socket timeouts in `UnixSocket` ensure it cannot
+    /// hang indefinitely.
+    ///
+    /// Both actions run asynchronously on the runtime queue so the caller (the app
+    /// delegate wake handler, running on the main actor) returns immediately.
+    public func recoverAfterWake() {
+        queue.async { [weak self] in
+            guard let self else { return }
+
+            // Re-resolve the temperature sensor service list. The cost is the same
+            // ~17.7 ms as the initial setup, paid once per wake. Without this, a
+            // post-wake tick sees nil temperatures and the thermal bar sits empty
+            // until the user restarts the app.
+            ThermalReader.sensor.rescan()
+
+            // If the helper socket file is present but the client is not connected,
+            // attempt a reconnect. This covers the hard-power-off case where the
+            // helper process was killed without our heartbeat getting a chance to
+            // clean up. The connect call has its own bounded timeout, so the worst
+            // case is a brief delay rather than a hang.
+            if self.helper.isAvailable && !self.helper.isConnected {
+                try? self.helper.connect()
+                self.log.append(LogEntry(
+                    kind: .note,
+                    detail: "wake recovery: re-connected helper socket"))
+            }
+
+            // Force an immediate tick so the panel shows fresh post-wake readings
+            // rather than data from before the sleep. The regular 5-second timer will
+            // fire on its own schedule, but that can be up to 5 seconds of stale data.
+            self.tick()
+        }
+    }
+
     private func applyScan(_ label: [String]) {
         registry.replaceProcessLease(label)
         if !label.isEmpty {

@@ -38,32 +38,8 @@ enum AppIconResolver {
     static func forget() { cache.removeAll() }
 }
 
-/// An agent's icon: the real one when the app is installed, the fallback glyph when it
-/// is not.
-///
-/// Idle agents render greyscale and dimmed. Once the row carries full-colour vendor
-/// artwork, colour can no longer be what encodes working-vs-idle — the icons would
-/// shout over the status. Desaturation gives that job back to the panel.
-struct AgentIcon: View {
-    var status: AgentStatus
-    var size: CGFloat = 15
-
-    var body: some View {
-        Group {
-            if let image = AppIconResolver.icon(for: status.bundleIdentifier) {
-                Image(nsImage: image)
-                    .resizable()
-                    .interpolation(.high)
-                    .aspectRatio(contentMode: .fit)
-            } else {
-                Image(systemName: status.symbolName)
-                    .font(.system(size: size - 4))
-                    .foregroundStyle(status.isWorking ? Color.green : .secondary)
-                    .frame(width: size, height: size)
-            }
-        }
-        .frame(width: size, height: size)
-        .saturation(status.isWorking ? 1 : 0)
-        .opacity(status.isWorking ? 1 : 0.5)
-    }
-}
+// The `AgentIcon` view that used to live here is gone with the agent roster it drew — a
+// section listing every AI tool on the Mac with a colour icon each, which is a thing to
+// look at rather than an answer to "will my Mac stay awake". The resolver above stays:
+// `AppModel.refreshHealth()` still drops its cache, so a freshly installed agent is
+// picked up without a restart, and the CLI's health output reads the same source.
