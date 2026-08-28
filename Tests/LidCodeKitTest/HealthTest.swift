@@ -333,36 +333,36 @@ final class AgentStatusTest: XCTestCase {
     private func report(_ check: HealthCheck...) -> HealthReport { HealthReport(check: check) }
 
     func testEveryKnownAgentGetsARow() {
-        let status = AgentStatus.build(activeLease: [], health: nil)
+        let status = AgentHealthStatus.build(activeLease: [], health: nil)
         XCTAssertEqual(status.count, ServiceEndpoint.known.count)
         XCTAssertTrue(status.allSatisfy { !$0.isWorking })
     }
 
     func testLeaseMarksTheRightAgentWorking() {
-        let status = AgentStatus.build(activeLease: ["Claude Code · lidcode"], health: nil)
+        let status = AgentHealthStatus.build(activeLease: ["Claude Code · lidcode"], health: nil)
         XCTAssertEqual(status.first { $0.id == "anthropic" }?.isWorking, true)
         XCTAssertEqual(status.first { $0.id == "openai" }?.isWorking, false)
     }
 
     /// The panel is read top-down, so what is running now has to be at the top.
     func testWorkingAgentSortFirst() {
-        let status = AgentStatus.build(activeLease: ["cursor-agent"], health: nil)
+        let status = AgentHealthStatus.build(activeLease: ["cursor-agent"], health: nil)
         XCTAssertEqual(status.first?.id, "cursor")
     }
 
     func testTwoAgentsCanWorkAtOnce() {
-        let status = AgentStatus.build(activeLease: ["claude", "codex"], health: nil)
+        let status = AgentHealthStatus.build(activeLease: ["claude", "codex"], health: nil)
         XCTAssertEqual(Set(status.filter(\.isWorking).map(\.id)), ["anthropic", "openai"])
     }
 
     func testLeaseCountShowsInTheWorkLabel() {
-        let status = AgentStatus.build(
+        let status = AgentHealthStatus.build(
             activeLease: ["Claude Code · a", "Claude Code · b"], health: nil)
         XCTAssertEqual(status.first { $0.id == "anthropic" }?.workDisplay, "working ×2")
     }
 
     func testIdleAgentSaysIdle() {
-        let status = AgentStatus.build(activeLease: [], health: nil)
+        let status = AgentHealthStatus.build(activeLease: [], health: nil)
         XCTAssertEqual(status.first { $0.id == "xai" }?.workDisplay, "idle")
     }
 
@@ -370,7 +370,7 @@ final class AgentStatusTest: XCTestCase {
         let health = report(HealthCheck(
             id: "service.anthropic", group: .service, label: "Claude",
             state: .ok, detail: "reachable", latencyMillisecond: 42))
-        let status = AgentStatus.build(activeLease: [], health: health)
+        let status = AgentHealthStatus.build(activeLease: [], health: health)
         let claude = status.first { $0.id == "anthropic" }
         XCTAssertEqual(claude?.serviceState, .ok)
         XCTAssertEqual(claude?.serviceDisplay, "API ok · 42ms")
@@ -378,7 +378,7 @@ final class AgentStatusTest: XCTestCase {
 
     /// An unprobed agent must not masquerade as healthy — no dot, not a green one.
     func testUnprobedAgentHasNoServiceState() {
-        let status = AgentStatus.build(activeLease: [], health: report())
+        let status = AgentHealthStatus.build(activeLease: [], health: report())
         let grok = status.first { $0.id == "xai" }
         XCTAssertNil(grok?.serviceState)
         XCTAssertEqual(grok?.serviceDisplay, "not checked")
@@ -387,7 +387,7 @@ final class AgentStatusTest: XCTestCase {
     func testDownServiceIsSpelledOut() {
         let health = report(HealthCheck(
             id: "service.openai", group: .service, label: "Codex", state: .down, detail: "boom"))
-        let status = AgentStatus.build(activeLease: ["codex"], health: health)
+        let status = AgentHealthStatus.build(activeLease: ["codex"], health: health)
         XCTAssertEqual(status.first { $0.id == "openai" }?.serviceDisplay, "API unreachable")
     }
 
@@ -395,7 +395,7 @@ final class AgentStatusTest: XCTestCase {
     func testWorkingAndDownAreReportedIndependently() {
         let health = report(HealthCheck(
             id: "service.anthropic", group: .service, label: "Claude", state: .down, detail: "boom"))
-        let claude = AgentStatus.build(activeLease: ["claude"], health: health)
+        let claude = AgentHealthStatus.build(activeLease: ["claude"], health: health)
             .first { $0.id == "anthropic" }
         XCTAssertEqual(claude?.isWorking, true)
         XCTAssertEqual(claude?.serviceState, .down)

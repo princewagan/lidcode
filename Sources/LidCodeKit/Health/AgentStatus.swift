@@ -1,12 +1,18 @@
 import Foundation
 
-/// One AI agent's line in the panel: is it working right now, and is its API up.
+/// One AI agent's line in the health panel: is it working right now, and is its API up.
 ///
 /// The two halves are independent and both matter. An agent that is working while its
 /// API is down is a run that is burning battery for nothing; an agent that is idle
 /// while its API is fine is just an agent you are not using. Collapsing them into a
 /// single "status" would lose exactly the case worth waking up for.
-public struct AgentStatus: Codable, Sendable, Equatable, Identifiable {
+///
+/// Renamed from `AgentStatus` to `AgentHealthStatus` because W2 introduced
+/// `public enum AgentStatus` (session running state: running/blocked/error/finished)
+/// as part of the Frozen Contract in the session-truth plan. Both types live in the same
+/// Swift module (LidCodeKit), so they cannot share the name. The health struct is the
+/// smaller consumer and is therefore the one that moves.
+public struct AgentHealthStatus: Codable, Sendable, Equatable, Identifiable {
     public var id: String
     public var label: String
     /// Fallback glyph, used when the agent's app is not installed on this Mac.
@@ -69,15 +75,15 @@ public struct AgentStatus: Codable, Sendable, Equatable, Identifiable {
         activeLease: [String],
         health: HealthReport?,
         catalog: [ServiceEndpoint] = ServiceEndpoint.known
-    ) -> [AgentStatus] {
+    ) -> [AgentHealthStatus] {
         let haystack = activeLease.map { (raw: $0, lowered: $0.lowercased()) }
 
-        let status = catalog.map { endpoint -> AgentStatus in
+        let status = catalog.map { endpoint -> AgentHealthStatus in
             let matched = haystack
                 .filter { entry in endpoint.leaseMatch.contains { entry.lowered.contains($0) } }
                 .map(\.raw)
             let check = health?.check.first { $0.id == "service.\(endpoint.id)" }
-            return AgentStatus(
+            return AgentHealthStatus(
                 id: endpoint.id,
                 label: endpoint.label,
                 symbolName: endpoint.symbolName,
