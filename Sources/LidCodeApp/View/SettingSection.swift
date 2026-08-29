@@ -186,6 +186,12 @@ struct SettingSection: View {
                 set: { model.setNetworkProbe($0) }
             ))
             .help("DNS plus a HEAD request to the API of whichever agent holds a lease. Off means LidCode makes no outbound requests at all.")
+
+            Toggle("Dim screen when lid is shut", isOn: Binding(
+                get: { setting.isDimOnLidCloseOn },
+                set: { model.updateSetting(SettingPatch(isDimOnLidCloseOn: $0)) }
+            ))
+            .help("Turns the built-in display down to minimum while the lid is closed. Put back when you open it.")
         }
         .font(.system(size: 11))
         .controlSize(.small)

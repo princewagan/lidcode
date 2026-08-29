@@ -37,9 +37,13 @@ public struct ClamshellReading: Codable, Sendable, Equatable {
 /// command failure → `.unknown`.
 ///
 /// Desktop Macs and machines that do not publish `AppleClamshellState`
-/// return `.unknown`, which is treated as "open" for safety: the
-/// `disablesleep` call is suppressed when the state is unknown, so a
-/// desktop can never accidentally be left unable to sleep.
+/// return `.unknown`. The two consumers of this value both treat `.unknown`
+/// as `.open` for safety: the brightness reconcile only dims when the state
+/// is `.closed`, and the status panel shows the physical lid badge only
+/// when the state is known. `disablesleep` is no longer gated on lid state
+/// at all — it is set pre-emptively when the user arms closed-lid protection,
+/// because macOS clamshell-sleeps within ~1–2 s of the lid closing, far
+/// faster than the 5 s tick could react if we waited to confirm `.closed`.
 ///
 /// Thread safety: the result cache is protected by `NSLock`. `read()` is
 /// safe to call from any thread.
@@ -67,6 +71,17 @@ public final class ClamshellStateReader: @unchecked Sendable {
     public init() {}
 
     // MARK: - Public API
+
+    /// Discards the cached reading so the next `read()` goes straight to ioreg.
+    ///
+    /// Called when a screen-sleep notification fires, which is the earliest signal that
+    /// the lid has closed. Without this, the tick + cache combination means the runtime
+    /// cannot see `.closed` for up to 10 seconds — long after macOS has already slept.
+    public func invalidate() {
+        lock.lock()
+        cached = nil
+        lock.unlock()
+    }
 
     /// Returns the current lid state, using a 5-second cache.
     ///

@@ -260,9 +260,15 @@ case "stop":
 
 case "lid":
     guard let state = rest.first, state == "on" || state == "off" else {
-        fail("usage: lidcode lid on|off [--timer 8h]")
+        fail("usage: lidcode lid on|off [--timer 8h] [--mode manual|smart]")
     }
-    report(send(.clamshell(isOn: state == "on", second: second, mode: mode)))
+    // Default to .manual so `lidcode lid on --timer 8h` keeps disablesleep for the
+    // full timer regardless of agent activity. Without this the shared default of
+    // .smart means a lid-on with no running session releases after idleReleaseSecond
+    // (~600 s) — making the timer meaningless for non-agent use. An explicit
+    // `--mode smart` still honours the caller's intent.
+    let lidMode = HoldMode(rawValue: flagValue("--mode", in: rest) ?? "manual") ?? .manual
+    report(send(.clamshell(isOn: state == "on", second: second, mode: lidMode)))
 
 case "autowatch":
     guard let state = rest.first else { fail("usage: lidcode autowatch on|off|toggle") }
@@ -328,12 +334,15 @@ case "set":
     if let probe = flagValue("--network-probe", in: rest) {
         patch.isNetworkProbeOn = probe == "on" || probe == "true"
     }
+    if let dim = flagValue("--dim-on-lid-close", in: rest) {
+        patch.isDimOnLidCloseOn = dim == "on" || dim == "true"
+    }
     patch.holdSecond = flagValue("--hold", in: rest).flatMap(parseSecond)
     patch.sustainedHeatSecond = flagValue("--sustained-heat", in: rest).flatMap(parseSecond)
     guard !patch.isEmpty else {
         fail("usage: lidcode set [--soft-battery 25] [--hard-battery 5] [--idle-release 5m] "
              + "[--thermal-ceiling serious] [--charging-only on|off] [--network-probe on|off] "
-             + "[--hold 4h] [--sustained-heat 15m]")
+             + "[--dim-on-lid-close on|off] [--hold 4h] [--sustained-heat 15m]")
     }
     report(send(.updateSetting(patch)))
 

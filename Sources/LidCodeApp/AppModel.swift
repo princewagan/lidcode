@@ -107,7 +107,7 @@ final class AppModel: ObservableObject {
 
         guard isOn else {
             isSwitching = true
-            runtime.setClamshell(false, second: nil, mode: .smart) { [weak self] _ in
+            runtime.setClamshell(false, second: nil, mode: .manual) { [weak self] _ in
                 guard let self else { return }
                 self.runtime.endHold(reason: .userStopped)
                 self.isSwitching = false
@@ -123,7 +123,7 @@ final class AppModel: ObservableObject {
             guard isHelperReady else {
                 // No root helper and the user declined to install one. Hold anyway — the
                 // Mac still stays awake, it just will not survive the lid closing.
-                runtime.beginHold(second: second, mode: .smart)
+                runtime.beginHold(second: second, mode: .manual)
                 return
             }
             enableClamshell(second: second)
@@ -134,14 +134,18 @@ final class AppModel: ObservableObject {
 
     private func enableClamshell(second: Int) {
         isSwitching = true
-        runtime.setClamshell(true, second: second, mode: .smart) { [weak self] result in
+        // Manual mode: hold for the full duration regardless of whether an agent session
+        // is running. Smart mode would kill a by-hand hold after 10 minutes of idleness —
+        // a hold the user explicitly turned on and timed on the slider should not die
+        // in the background because no Claude session happened to be active.
+        runtime.setClamshell(true, second: second, mode: .manual) { [weak self] result in
             guard let self else { return }
             self.isSwitching = false
             if case .failure(let error) = result {
                 // The privileged half failed, so say so — and still keep the Mac awake,
                 // which is the part that does not need root.
                 self.alert = error.localizedDescription
-                self.runtime.beginHold(second: second, mode: .smart)
+                self.runtime.beginHold(second: second, mode: .manual)
             }
         }
     }
@@ -152,7 +156,18 @@ final class AppModel: ObservableObject {
     func setHoldSecond(_ second: Int) {
         _ = runtime.updateSetting(SettingPatch(holdSecond: second))
         guard isEnabled else { return }
-        runtime.beginHold(second: second, mode: .smart)
+        // extendHold updates the deadline without touching mode, so dragging the slider
+        // during a running .smart auto-watch hold cannot silently convert it to .manual
+        // and disable the idle-release for the rest of the session.
+        runtime.extendHold(second: second)
+    }
+
+    /// Forwards the immediate lid-check to the runtime.
+    ///
+    /// Called from the screen-sleep notification so dimming reacts within a tick rather
+    /// than waiting up to 10s for the cache and timer to align.
+    func checkLidNow() {
+        runtime.checkLidNow()
     }
 
     // MARK: - Safety guards
@@ -310,12 +325,13 @@ final class AppModel: ObservableObject {
         case .settingList:
             let setting = runtime.currentSetting
             return .text([
-                "soft-battery   \(setting.softBatteryPercent)%",
-                "hard-battery   \(setting.hardBatteryPercent)%",
+                "soft-battery    \(setting.softBatteryPercent)%",
+                "hard-battery    \(setting.hardBatteryPercent)%",
                 "thermal-ceiling \(setting.thermalCeiling.rawValue)",
-                "idle-release   \(setting.idleReleaseSecond)s",
-                "charging-only  \(setting.isChargingOnly)",
-                "network-probe  \(setting.isNetworkProbeOn)",
+                "idle-release    \(setting.idleReleaseSecond)s",
+                "charging-only   \(setting.isChargingOnly)",
+                "network-probe   \(setting.isNetworkProbeOn)",
+                "dim-on-lid-close \(setting.isDimOnLidCloseOn)",
             ])
 
         case .updateSetting(let patch):

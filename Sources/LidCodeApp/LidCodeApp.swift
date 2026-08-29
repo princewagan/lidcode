@@ -470,6 +470,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             selector: #selector(screensDidWake),
             name: NSWorkspace.screensDidWakeNotification,
             object: nil)
+
+        // `screensDidSleepNotification` fires on lid close (among other paths). We route
+        // it to `checkLidNow` so the brightness dim reacts immediately rather than
+        // waiting up to 10s for the cache and tick timer to align.
+        center.addObserver(
+            self,
+            selector: #selector(screensDidSleep),
+            name: NSWorkspace.screensDidSleepNotification,
+            object: nil)
+    }
+
+    @objc private func screensDidSleep(_ notification: Notification) {
+        // Screens sleeping is the earliest observable signal of a lid close. Force an
+        // immediate lid-state read and brightness reconcile without waiting for the 5s tick.
+        model.checkLidNow()
     }
 
     @objc private func machineWillSleep(_ notification: Notification) {
@@ -513,7 +528,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         //    glyph re-evaluates.
         model.refreshHealth()
 
-        // 4. Call the runtime's wake recovery entry point. This re-scans temperature
+        // 4. Invalidate the lid-state cache so the next tick reads a fresh value rather
+        //    than serving a pre-wake cached reading. screensDidSleep already calls this
+        //    on the close path, but without an equivalent call here the 5s cache can
+        //    keep returning .closed after the lid opens — delaying a brightness restore
+        //    by up to ~10s while the user is actively looking at the screen.
+        model.checkLidNow()
+
+        // 5. Call the runtime's wake recovery entry point. This re-scans temperature
         //    sensors (which a sleep can invalidate) and attempts to reconnect the helper
         //    socket if it was lost during a hard power-off. It runs asynchronously on
         //    the runtime queue, so this call returns immediately.

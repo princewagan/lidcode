@@ -57,6 +57,7 @@ public struct SettingPatch: Codable, Sendable {
     public var menuBarShowErrorBadge: Bool?
     public var menuBarShowTempWarnIcon: Bool?
     public var menuBarShowAlertIcon: Bool?
+    public var isDimOnLidCloseOn: Bool?
 
     public init(
         softBatteryPercent: Int? = nil,
@@ -74,7 +75,8 @@ public struct SettingPatch: Codable, Sendable {
         menuBarShowBlockedBadge: Bool? = nil,
         menuBarShowErrorBadge: Bool? = nil,
         menuBarShowTempWarnIcon: Bool? = nil,
-        menuBarShowAlertIcon: Bool? = nil
+        menuBarShowAlertIcon: Bool? = nil,
+        isDimOnLidCloseOn: Bool? = nil
     ) {
         self.softBatteryPercent = softBatteryPercent
         self.hardBatteryPercent = hardBatteryPercent
@@ -92,6 +94,7 @@ public struct SettingPatch: Codable, Sendable {
         self.menuBarShowErrorBadge = menuBarShowErrorBadge
         self.menuBarShowTempWarnIcon = menuBarShowTempWarnIcon
         self.menuBarShowAlertIcon = menuBarShowAlertIcon
+        self.isDimOnLidCloseOn = isDimOnLidCloseOn
     }
 
     public var isEmpty: Bool {
@@ -102,6 +105,7 @@ public struct SettingPatch: Codable, Sendable {
             && menuBarShowStateIcon == nil && menuBarShowActiveBadge == nil
             && menuBarShowBlockedBadge == nil && menuBarShowErrorBadge == nil
             && menuBarShowTempWarnIcon == nil && menuBarShowAlertIcon == nil
+            && isDimOnLidCloseOn == nil
     }
 
     public func applied(to setting: Setting) -> Setting {
@@ -122,6 +126,7 @@ public struct SettingPatch: Codable, Sendable {
         if let menuBarShowErrorBadge { copy.menuBarShowErrorBadge = menuBarShowErrorBadge }
         if let menuBarShowTempWarnIcon { copy.menuBarShowTempWarnIcon = menuBarShowTempWarnIcon }
         if let menuBarShowAlertIcon { copy.menuBarShowAlertIcon = menuBarShowAlertIcon }
+        if let isDimOnLidCloseOn { copy.isDimOnLidCloseOn = isDimOnLidCloseOn }
         return copy.normalized()
     }
 }

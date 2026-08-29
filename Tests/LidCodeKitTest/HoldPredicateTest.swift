@@ -299,16 +299,32 @@ final class HoldPredicateTest: XCTestCase {
         XCTAssertTrue(snap.physicalLid.isStale)
     }
 
-    // MARK: - Lid-open forces disablesleep off
+    // MARK: - shouldDisableSleep truth table
 
-    /// When clamshellActive is true but the lid is physically open,
-    /// a tick must call setClamshell(false) and not hold disablesleep.
-    /// We can only test the snapshot state (not the actual pmset call) from here.
-    func testLidOpenForcesDisableAsleepOff() {
-        // This is a structural check: RuntimeSnapshot.isClamshellActive must be
-        // consistent with the physical lid state after a tick.
-        // A full end-to-end test requires the helper; here we verify the snapshot field.
-        let snap = RuntimeSnapshot(isClamshellActive: false, physicalLid: ClamshellReading(state: .open, readAt: Date(), isStale: false))
-        XCTAssertFalse(snap.isClamshellActive, "lid open must not have disablesleep on")
+    /// disablesleep must be 1 exactly when armed && held && not safety-locked.
+    /// This covers the pure predicate that the tick reconcile calls directly.
+    func testShouldDisableSleepAllTrue() {
+        XCTAssertTrue(LidCodeRuntime.shouldDisableSleep(isArmed: true, isHeld: true, isSafetyLocked: false),
+            "armed + held + no safety lock must request disablesleep 1")
+    }
+
+    func testShouldDisableSleepNotArmed() {
+        XCTAssertFalse(LidCodeRuntime.shouldDisableSleep(isArmed: false, isHeld: true, isSafetyLocked: false),
+            "not armed: disablesleep must be 0 even while held")
+    }
+
+    func testShouldDisableSleepNotHeld() {
+        XCTAssertFalse(LidCodeRuntime.shouldDisableSleep(isArmed: true, isHeld: false, isSafetyLocked: false),
+            "not held: armed intent without a live hold must not set disablesleep")
+    }
+
+    func testShouldDisableSleepSafetyLocked() {
+        XCTAssertFalse(LidCodeRuntime.shouldDisableSleep(isArmed: true, isHeld: true, isSafetyLocked: true),
+            "safety lock engaged: disablesleep must be 0 even when armed and held")
+    }
+
+    func testShouldDisableSleepAllFalse() {
+        XCTAssertFalse(LidCodeRuntime.shouldDisableSleep(isArmed: false, isHeld: false, isSafetyLocked: true),
+            "nothing active: disablesleep must be 0")
     }
 }

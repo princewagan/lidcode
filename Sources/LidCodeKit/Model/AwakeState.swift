@@ -93,6 +93,11 @@ public struct RuntimeSnapshot: Codable, Sendable {
     /// When true, the hold continues despite a guard warning. Warnings still show.
     public var isGuardOverrideOn: Bool
 
+    /// True when the user has enabled closed-lid protection but `disablesleep` may not
+    /// be 1 yet — either because the hold has not started or the helper is temporarily
+    /// disconnected. Distinct from `isClamshellActive`, which means pmset has agreed.
+    public var isClamshellArmed: Bool
+
     public init(
         isAwakeHeld: Bool = false,
         isAssertionActive: Bool = false,
@@ -114,7 +119,8 @@ public struct RuntimeSnapshot: Codable, Sendable {
         isStalled: Bool = false,
         physicalLid: ClamshellReading = ClamshellReading(state: .unknown, readAt: Date(), isStale: true),
         foreignBlockerCount: Int = 0,
-        isGuardOverrideOn: Bool = false
+        isGuardOverrideOn: Bool = false,
+        isClamshellArmed: Bool = false
     ) {
         self.isAwakeHeld = isAwakeHeld
         self.isAssertionActive = isAssertionActive
@@ -137,6 +143,7 @@ public struct RuntimeSnapshot: Codable, Sendable {
         self.physicalLid = physicalLid
         self.foreignBlockerCount = foreignBlockerCount
         self.isGuardOverrideOn = isGuardOverrideOn
+        self.isClamshellArmed = isClamshellArmed
     }
 
     /// Decoded key by key with a fallback, for the same reason `Setting` is.
@@ -171,6 +178,7 @@ public struct RuntimeSnapshot: Codable, Sendable {
             ?? ClamshellReading(state: .unknown, readAt: Date(), isStale: true)
         foreignBlockerCount = try container.decodeIfPresent(Int.self, forKey: .foreignBlockerCount) ?? 0
         isGuardOverrideOn = try container.decodeIfPresent(Bool.self, forKey: .isGuardOverrideOn) ?? false
+        isClamshellArmed = try container.decodeIfPresent(Bool.self, forKey: .isClamshellArmed) ?? false
     }
 
     public var runtimeSecond: Int {

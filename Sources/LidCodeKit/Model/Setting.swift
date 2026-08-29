@@ -71,6 +71,15 @@ public struct Setting: Codable, Sendable, Equatable {
     /// Show the blocking guard alert icon (red thermometer / red battery) in the menu bar.
     public var menuBarShowAlertIcon: Bool
 
+    /// Whether the user has closed-lid protection armed. Restored on launch only
+    /// alongside a still-live `activeHoldExpiresAt`, so it can never outlive the
+    /// session the user actually asked for.
+    public var isClamshellArmed: Bool
+
+    /// Dim the built-in display to minimum while the lid is shut and closed-lid
+    /// protection is armed. Restored to the previous level when the lid opens.
+    public var isDimOnLidCloseOn: Bool
+
     public static let softBatteryRange = 15...50
     public static let hardBatteryRange = 4...8
     /// Changed from 8h to 6h so the slider's intervals are better spaced (J6).
@@ -130,7 +139,9 @@ public struct Setting: Codable, Sendable, Equatable {
         menuBarShowBlockedBadge: true,
         menuBarShowErrorBadge: true,
         menuBarShowTempWarnIcon: true,
-        menuBarShowAlertIcon: true
+        menuBarShowAlertIcon: true,
+        isClamshellArmed: false,
+        isDimOnLidCloseOn: true
     )
 
     /// Every parameter added after `isNetworkProbeOn` has a default, so the existing
@@ -153,7 +164,9 @@ public struct Setting: Codable, Sendable, Equatable {
         menuBarShowBlockedBadge: Bool = true,
         menuBarShowErrorBadge: Bool = true,
         menuBarShowTempWarnIcon: Bool = true,
-        menuBarShowAlertIcon: Bool = true
+        menuBarShowAlertIcon: Bool = true,
+        isClamshellArmed: Bool = false,
+        isDimOnLidCloseOn: Bool = true
     ) {
         self.softBatteryPercent = softBatteryPercent
         self.hardBatteryPercent = hardBatteryPercent
@@ -173,6 +186,8 @@ public struct Setting: Codable, Sendable, Equatable {
         self.menuBarShowErrorBadge = menuBarShowErrorBadge
         self.menuBarShowTempWarnIcon = menuBarShowTempWarnIcon
         self.menuBarShowAlertIcon = menuBarShowAlertIcon
+        self.isClamshellArmed = isClamshellArmed
+        self.isDimOnLidCloseOn = isDimOnLidCloseOn
     }
 
     /// Decoded field by field with a fallback per key.
@@ -219,6 +234,10 @@ public struct Setting: Codable, Sendable, Equatable {
             ?? fallback.menuBarShowTempWarnIcon
         menuBarShowAlertIcon = try container.decodeIfPresent(Bool.self, forKey: .menuBarShowAlertIcon)
             ?? fallback.menuBarShowAlertIcon
+        isClamshellArmed = try container.decodeIfPresent(Bool.self, forKey: .isClamshellArmed)
+            ?? fallback.isClamshellArmed
+        isDimOnLidCloseOn = try container.decodeIfPresent(Bool.self, forKey: .isDimOnLidCloseOn)
+            ?? fallback.isDimOnLidCloseOn
     }
 
     /// Clamp anything a hand-edited config file could get wrong. A soft floor below
@@ -280,6 +299,24 @@ extension Comparable {
     }
 }
 
+/// Written atomically when we dim the built-in display, deleted when we restore.
+///
+/// If the app crashes or is force-quit between dim and restore, `LidCodeRuntime.start()`
+/// reads this on the next launch and puts brightness back immediately — before any tick
+/// can dim again. Without this, a crash strands the user with a black screen that
+/// survives reboots until they manually raise brightness.
+public struct BrightnessRestorePoint: Codable, Sendable {
+    /// The brightness level to restore, 0.0–1.0.
+    public var level: Float
+    /// When the dimming happened, for diagnostic logging.
+    public var savedAt: Date
+
+    public init(level: Float, savedAt: Date) {
+        self.level = level
+        self.savedAt = savedAt
+    }
+}
+
 /// Every on-disk path LidCode owns, in one place.
 public enum LidCodePath {
     public static var supportDirectory: URL {
@@ -303,6 +340,13 @@ public enum LidCodePath {
     /// Helper-side record of whether *we* are the one holding disablesleep, so a
     /// helper restart can tell "LidCode left this on" from "the user set it by hand".
     public static let helperStatePath = "/var/db/lidcode/helper-state.json"
+
+    /// Crash-safe brightness restore record. Written atomically the moment we dim,
+    /// deleted the moment we restore. If it exists at launch, a previous run was
+    /// interrupted before it could put brightness back — we restore immediately.
+    public static var brightnessRestore: URL {
+        supportDirectory.appendingPathComponent("brightness-restore.json")
+    }
 
     public static func ensureSupportDirectory() throws {
         try FileManager.default.createDirectory(
