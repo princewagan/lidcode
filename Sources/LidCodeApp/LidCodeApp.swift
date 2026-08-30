@@ -107,8 +107,35 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             icon = Icon(snapshot)
 
             // Utilization percent (C5, C6)
+            //
+            // Shows the five-hour utilization of whichever account is currently in use.
+            // "Newest process wins": a user switching accounts leaves old sessions from the
+            // previous account alive, so "any ADVO process → ADVO is active" is wrong.
+            // The newest `claude` process carries the correct environment.
+            //
+            // Fallback chain:
+            //   1. Active account resolved and it is "ok" → its five-hour utilization.
+            //   2. Active account unknown, not "ok", or no per-account data →
+            //      the top-level summary window (back-compat, preserves old behaviour).
             if let usage = snapshot.usage {
-                let pct = Int(usage.fiveHour.utilization.rounded())
+                // readStorageDir() returns String??:
+                //   nil          → detection failed (ps timed out, no claude process)
+                //   .some(nil)   → newest process has no env var → default account (storageDir nil)
+                //   .some(path)  → newest process carries CLAUDE_SECURESTORAGE_CONFIG_DIR=path
+                let detectedDir: String?? = ActiveClaudeAccountReader.readStorageDir()
+                let pct: Int
+                if let activeConfigDir = detectedDir {
+                    // A process was found. Match by storageDir (nil for default, path for non-default).
+                    let matched = usage.accounts.first { $0.storageDir == activeConfigDir }
+                    if let acct = matched, acct.status == "ok", let fh = acct.fiveHour {
+                        pct = Int(fh.utilization.rounded())
+                    } else {
+                        pct = Int(usage.fiveHour.utilization.rounded())
+                    }
+                } else {
+                    // Detection failed — ps timed out or no claude process is running.
+                    pct = Int(usage.fiveHour.utilization.rounded())
+                }
                 percentText = "\(pct)%"
             } else {
                 percentText = nil

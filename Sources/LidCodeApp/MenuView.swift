@@ -309,27 +309,108 @@ struct MenuView: View {
     @ViewBuilder
     private var usageSection: some View {
         if let usage = snapshot.usage {
-            VStack(alignment: .leading, spacing: 6) {
-                SectionLabel(
-                    text: "Prince",
-                    trailing: usage.isStale ? "stale" : usage.fiveHour.resetDisplay.map { "resets in \($0)" })
-
-                usageBar("5-hour", usage.fiveHour, isStale: usage.isStale)
-                usageBar("1-week", usage.sevenDay, isStale: usage.isStale)
+            // Render one block per account in producer order (ADVO first, then PRINCE).
+            // Falling back to the single-block path when accounts is empty means an old
+            // file format never causes a blank panel.
+            //
+            // Detect the active account so the corresponding block can be labelled.
+            // readStorageDir() returns String?? — nil means detection failed, .some(nil)
+            // means the default account is active, .some(path) means a non-default account.
+            let detectedDir: String?? = ActiveClaudeAccountReader.readStorageDir()
+            if usage.accounts.isEmpty {
+                usageBlock(
+                    label: "Claude",
+                    trailing: usage.isStale ? "stale" : usage.fiveHour.resetDisplay.map { "resets in \($0)" },
+                    fiveHour: usage.fiveHour,
+                    sevenDay: usage.sevenDay,
+                    isStale: usage.isStale,
+                    accountStatus: "ok",
+                    isActive: false)
+            } else {
+                ForEach(usage.accounts, id: \.key) { acct in
+                    let trailing: String? = usage.isStale
+                        ? "stale"
+                        : acct.fiveHour?.resetDisplay.map { "resets in \($0)" }
+                    // An account is active when detection succeeded and its storageDir
+                    // matches the detected config dir (nil matches the default account).
+                    let isActive: Bool = {
+                        guard let configDir = detectedDir else { return false }
+                        return acct.storageDir == configDir
+                    }()
+                    usageBlock(
+                        label: acct.label,
+                        trailing: trailing,
+                        fiveHour: acct.fiveHour,
+                        sevenDay: acct.sevenDay,
+                        isStale: usage.isStale,
+                        accountStatus: acct.status,
+                        isActive: isActive)
+                }
             }
         }
     }
 
-    private func usageBar(_ label: String, _ window: UsageWindow, isStale: Bool) -> some View {
-        BarGauge(
+    /// One labelled pair of bars for a single account.
+    ///
+    /// When the account is not "ok" the bars are greyed at 0 and a short status
+    /// phrase replaces the reset-countdown — the row still appears so the user knows
+    /// the account exists and what state it is in.
+    ///
+    /// When `isActive` is true, "active" is appended to the trailing label so the user
+    /// can tell at a glance which account the menu bar number refers to.
+    @ViewBuilder
+    private func usageBlock(
+        label: String,
+        trailing: String?,
+        fiveHour: UsageWindow?,
+        sevenDay: UsageWindow?,
+        isStale: Bool,
+        accountStatus: String,
+        isActive: Bool
+    ) -> some View {
+        let isOk = accountStatus == "ok"
+        // Status phrase shown instead of bars for non-ok accounts.
+        let statusPhrase: String? = {
+            switch accountStatus {
+            case "ok":          return nil
+            case "signed_out":  return "signed out"
+            case "expired":     return "needs login"
+            default:            return "error"
+            }
+        }()
+
+        // Build the trailing label: append "active" alongside the reset countdown or
+        // status phrase. The countdown is the most useful thing on an ok account, so it
+        // stays primary; "active" appears after a separator so neither displaces the other.
+        let trailingWithActive: String? = {
+            let base = isOk ? trailing : statusPhrase
+            guard isActive else { return base }
+            if let base { return "\(base) · active" }
+            return "active"
+        }()
+
+        VStack(alignment: .leading, spacing: 6) {
+            SectionLabel(text: label, trailing: trailingWithActive)
+            usageBar("5-hour", fiveHour, isStale: isStale, isOk: isOk)
+            usageBar("1-week", sevenDay, isStale: isStale, isOk: isOk)
+        }
+    }
+
+    private func usageBar(_ label: String, _ window: UsageWindow?, isStale: Bool, isOk: Bool = true) -> some View {
+        let fraction = (isOk ? window?.fraction : nil) ?? 0
+        let utilization = (isOk ? window?.utilization : nil) ?? 0
+        let resetDisplay = window?.resetDisplay
+        return BarGauge(
             label: label,
-            fraction: window.fraction,
-            color: isStale ? Palette.brandSoft : Palette.usageColor(percent: window.utilization),
-            value: "\(Int(window.utilization.rounded()))%"
+            fraction: fraction,
+            color: (!isOk || isStale) ? Palette.brandSoft : Palette.usageColor(percent: utilization),
+            value: isOk ? "\(Int(utilization.rounded()))%" : "—"
         )
         .help(isStale
               ? "Last read over five minutes ago — the usage file has not refreshed"
-              : window.resetDisplay.map { "Resets in \($0)" } ?? "Reset time unknown")
+              : (!isOk
+                 ? "Account unavailable"
+                 : resetDisplay.map { "Resets in \($0)" } ?? "Reset time unknown"))
     }
 
     // MARK: - Duration slider (J5: moved from settings drawer to main panel)
