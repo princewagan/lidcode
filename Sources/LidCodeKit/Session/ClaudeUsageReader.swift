@@ -33,6 +33,49 @@ public struct UsageWindow: Codable, Sendable, Equatable {
     }
 }
 
+/// Usage data for a single Claude account.
+///
+/// The fetcher runs per-account and the reader preserves producer order — ADVO
+/// first, then PRINCE — so the UI can render them in a stable, predictable sequence
+/// without sorting by key or label.
+public struct ClaudeAccountUsage: Codable, Sendable, Equatable {
+    /// Short machine-readable key, e.g. "advo" or "prince".
+    public var key: String
+    /// Display name, e.g. "ADVO" or "PRINCE".
+    public var label: String
+    /// "ok" | "signed_out" | "expired" | "error" — passed through so a new status
+    /// from the producer degrades to an unfamiliar string rather than crashing.
+    public var status: String
+    /// Only present when status is "ok".
+    public var fiveHour: UsageWindow?
+    /// Only present when status is "ok".
+    public var sevenDay: UsageWindow?
+    /// "normal" | "warning" | "critical". nil when status is not "ok".
+    public var severity: String?
+    /// The value the producer uses for `CLAUDE_SECURESTORAGE_CONFIG_DIR` for this
+    /// account. nil for the default account (PRINCE), which needs no env var. Matches
+    /// the same field written by `fetch-usage.py` so Swift never hardcodes any path.
+    public var storageDir: String?
+
+    public init(
+        key: String,
+        label: String,
+        status: String,
+        fiveHour: UsageWindow? = nil,
+        sevenDay: UsageWindow? = nil,
+        severity: String? = nil,
+        storageDir: String? = nil
+    ) {
+        self.key = key
+        self.label = label
+        self.status = status
+        self.fiveHour = fiveHour
+        self.sevenDay = sevenDay
+        self.severity = severity
+        self.storageDir = storageDir
+    }
+}
+
 public struct ClaudeUsage: Codable, Sendable, Equatable {
     public var fiveHour: UsageWindow
     public var sevenDay: UsageWindow
@@ -42,19 +85,25 @@ public struct ClaudeUsage: Codable, Sendable, Equatable {
     public var fetchedAt: Date
     /// true when `fetchedAt` is older than `staleAfterSecond`.
     public var isStale: Bool
+    /// One entry per account in producer order (ADVO then PRINCE). Empty only when the
+    /// file predates the multi-account format and synthesis failed for some reason — the
+    /// UI falls back to the top-level windows in that case.
+    public var accounts: [ClaudeAccountUsage]
 
     public init(
         fiveHour: UsageWindow,
         sevenDay: UsageWindow,
         severity: String,
         fetchedAt: Date,
-        isStale: Bool
+        isStale: Bool,
+        accounts: [ClaudeAccountUsage] = []
     ) {
         self.fiveHour = fiveHour
         self.sevenDay = sevenDay
         self.severity = severity
         self.fetchedAt = fetchedAt
         self.isStale = isStale
+        self.accounts = accounts
     }
 }
 
@@ -109,6 +158,25 @@ public enum ClaudeUsageReader {
         refreshed.isStale = now.timeIntervalSince(usage.fetchedAt) > staleAfterSecond
         refreshed.fiveHour.resetDisplay = UsageWindow.display(until: usage.fiveHour.resetsAt, asOf: now)
         refreshed.sevenDay.resetDisplay = UsageWindow.display(until: usage.sevenDay.resetsAt, asOf: now)
+        // Per-account reset countdowns are relative to the clock just like the top-level
+        // pair — skipping them here would freeze every account's countdown after the first
+        // cache hit even though the top-level ones keep ticking.
+        refreshed.accounts = usage.accounts.map { acct in
+            var a = acct
+            if let fh = acct.fiveHour {
+                a.fiveHour = UsageWindow(
+                    utilization: fh.utilization,
+                    resetsAt: fh.resetsAt,
+                    asOf: now)
+            }
+            if let sd = acct.sevenDay {
+                a.sevenDay = UsageWindow(
+                    utilization: sd.utilization,
+                    resetsAt: sd.resetsAt,
+                    asOf: now)
+            }
+            return a
+        }
         return refreshed
     }
 
@@ -119,10 +187,20 @@ public enum ClaudeUsageReader {
             var utilization: Double?
             var resetsAt: String?
         }
+        struct AccountPayload: Decodable {
+            var key: String
+            var label: String
+            var status: String
+            var severity: String?
+            var storageDir: String?
+            var fiveHour: Window?
+            var sevenDay: Window?
+        }
         var fetchedAt: String?
         var fiveHour: Window?
         var sevenDay: Window?
         var severity: String?
+        var accounts: [AccountPayload]?
     }
 
     public static func parse(_ data: Data, asOf now: Date = Date()) -> ClaudeUsage? {
@@ -133,12 +211,50 @@ public enum ClaudeUsageReader {
         // the thing this reader exists to avoid showing.
         guard let fetchedAt = payload.fetchedAt.flatMap(date(fromIso:)) else { return nil }
 
+        // Decode the accounts array when present. When absent (old file format), synthesise
+        // a single "prince" account from the top-level windows so nothing regresses.
+        let accounts: [ClaudeAccountUsage]
+        if let rawAccounts = payload.accounts {
+            accounts = rawAccounts.map { raw in
+                let fh = raw.fiveHour.map { window($0, asOf: now) }
+                let sd = raw.sevenDay.map { window($0, asOf: now) }
+                return ClaudeAccountUsage(
+                    key: raw.key,
+                    label: raw.label,
+                    status: raw.status,
+                    fiveHour: fh,
+                    sevenDay: sd,
+                    severity: raw.severity,
+                    storageDir: raw.storageDir)
+            }
+        } else {
+            // Old single-account file: synthesise the default account so callers can
+            // always iterate accounts[] without branching on format version.
+            let fh = window(payload.fiveHour, asOf: now)
+            let sd = window(payload.sevenDay, asOf: now)
+            accounts = [ClaudeAccountUsage(
+                key: "prince",
+                label: "PRINCE",
+                status: "ok",
+                fiveHour: fh,
+                sevenDay: sd,
+                severity: payload.severity ?? "normal")]
+        }
+
+        // Top-level windows: use what the file says when present; fall back to zeroed
+        // windows when absent (multi-account file without a back-compat summary).
+        // parse() returns nil only when fetched_at is unparseable — missing windows
+        // are a degraded state worth representing, not a reason to drop the reading.
+        let fiveHour = window(payload.fiveHour, asOf: now)
+        let sevenDay = window(payload.sevenDay, asOf: now)
+
         let usage = ClaudeUsage(
-            fiveHour: window(payload.fiveHour, asOf: now),
-            sevenDay: window(payload.sevenDay, asOf: now),
+            fiveHour: fiveHour,
+            sevenDay: sevenDay,
             severity: payload.severity ?? "normal",
             fetchedAt: fetchedAt,
-            isStale: false)
+            isStale: false,
+            accounts: accounts)
         return refreshed(usage, asOf: now)
     }
 

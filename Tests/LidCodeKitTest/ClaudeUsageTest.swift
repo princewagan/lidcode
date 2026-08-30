@@ -211,3 +211,225 @@ final class ClaudeUsageReaderFileTest: XCTestCase {
         XCTAssertEqual(ClaudeUsageReader.read(asOf: now), ClaudeUsageReader.read(asOf: now))
     }
 }
+
+// ---------------------------------------------------------------------------
+// Multi-account format tests
+// ---------------------------------------------------------------------------
+
+/// A multi-account payload with both accounts ok, in producer order (advo, prince).
+private let multiAccountPayload = Data("""
+{
+  "fetched_at": "2026-08-31T00:00:00Z",
+  "severity": "normal",
+  "five_hour": { "utilization": 8.0, "resets_at": "2026-08-31T05:00:00.000000+00:00" },
+  "seven_day": { "utilization": 45.0, "resets_at": "2026-09-07T00:00:00.000000+00:00" },
+  "accounts": [
+    {
+      "key": "advo",
+      "label": "ADVO",
+      "status": "ok",
+      "severity": "normal",
+      "five_hour": { "utilization": 8.0,  "resets_at": "2026-08-31T05:00:00.000000+00:00" },
+      "seven_day": { "utilization": 45.0, "resets_at": "2026-09-07T00:00:00.000000+00:00" }
+    },
+    {
+      "key": "prince",
+      "label": "PRINCE",
+      "status": "ok",
+      "severity": "warning",
+      "five_hour": { "utilization": 72.0, "resets_at": "2026-08-31T05:00:00.000000+00:00" },
+      "seven_day": { "utilization": 88.0, "resets_at": "2026-09-07T00:00:00.000000+00:00" }
+    }
+  ]
+}
+""".utf8)
+
+/// A file in the old single-account format — no `accounts` key at all.
+private let oldFormatPayload = Data("""
+{
+  "fetched_at": "2026-08-26T16:57:25Z",
+  "five_hour": { "utilization": 38.0, "resets_at": "2026-08-26T19:30:00.127765+00:00" },
+  "seven_day": { "utilization": 88.0, "resets_at": "2026-08-26T17:00:00.127793+00:00" },
+  "severity": "warning"
+}
+""".utf8)
+
+/// A multi-account file where the top-level back-compat windows are absent —
+/// only the accounts array carries the data.
+private let noTopLevelWindowsPayload = Data("""
+{
+  "fetched_at": "2026-08-31T00:00:00Z",
+  "severity": "normal",
+  "accounts": [
+    {
+      "key": "advo",
+      "label": "ADVO",
+      "status": "ok",
+      "severity": "normal",
+      "five_hour": { "utilization": 8.0,  "resets_at": "2026-08-31T05:00:00.000000+00:00" },
+      "seven_day": { "utilization": 45.0, "resets_at": "2026-09-07T00:00:00.000000+00:00" }
+    },
+    {
+      "key": "prince",
+      "label": "PRINCE",
+      "status": "signed_out"
+    }
+  ]
+}
+""".utf8)
+
+private let multiAccountFetchedAt = Date(timeIntervalSince1970: 1_788_134_400) // 2026-08-31T00:00:00Z
+
+final class ClaudeAccountUsageParseTest: XCTestCase {
+
+    // MARK: - Multi-account parse
+
+    func testMultiAccountParsePreservesProducerOrder() throws {
+        let usage = try XCTUnwrap(ClaudeUsageReader.parse(multiAccountPayload, asOf: multiAccountFetchedAt))
+        XCTAssertEqual(usage.accounts.count, 2)
+        XCTAssertEqual(usage.accounts[0].key, "advo")
+        XCTAssertEqual(usage.accounts[1].key, "prince")
+    }
+
+    func testMultiAccountParseDecodesLabels() throws {
+        let usage = try XCTUnwrap(ClaudeUsageReader.parse(multiAccountPayload, asOf: multiAccountFetchedAt))
+        XCTAssertEqual(usage.accounts[0].label, "ADVO")
+        XCTAssertEqual(usage.accounts[1].label, "PRINCE")
+    }
+
+    func testMultiAccountParseDecodesStatuses() throws {
+        let usage = try XCTUnwrap(ClaudeUsageReader.parse(multiAccountPayload, asOf: multiAccountFetchedAt))
+        XCTAssertEqual(usage.accounts[0].status, "ok")
+        XCTAssertEqual(usage.accounts[1].status, "ok")
+    }
+
+    func testMultiAccountParseDecodesUtilization() throws {
+        let usage = try XCTUnwrap(ClaudeUsageReader.parse(multiAccountPayload, asOf: multiAccountFetchedAt))
+        let advoUtil = try XCTUnwrap(usage.accounts[0].fiveHour).utilization
+        let princeUtil = try XCTUnwrap(usage.accounts[1].fiveHour).utilization
+        XCTAssertEqual(advoUtil, 8.0, accuracy: 0.001)
+        XCTAssertEqual(princeUtil, 72.0, accuracy: 0.001)
+    }
+
+    func testMultiAccountParseDecodesSeverityPerAccount() throws {
+        let usage = try XCTUnwrap(ClaudeUsageReader.parse(multiAccountPayload, asOf: multiAccountFetchedAt))
+        XCTAssertEqual(usage.accounts[0].severity, "normal")
+        XCTAssertEqual(usage.accounts[1].severity, "warning")
+    }
+
+    // MARK: - Old-format back-compat
+
+    func testOldFormatWithoutAccountsKeyParsesAndSynthesisesPrinceAccount() throws {
+        let usage = try XCTUnwrap(ClaudeUsageReader.parse(oldFormatPayload,
+                                                          asOf: Date(timeIntervalSince1970: 1_787_763_445)))
+        XCTAssertEqual(usage.accounts.count, 1)
+        XCTAssertEqual(usage.accounts[0].key, "prince")
+        XCTAssertEqual(usage.accounts[0].label, "PRINCE")
+        XCTAssertEqual(usage.accounts[0].status, "ok")
+        let fhUtil = try XCTUnwrap(usage.accounts[0].fiveHour).utilization
+        let sdUtil = try XCTUnwrap(usage.accounts[0].sevenDay).utilization
+        XCTAssertEqual(fhUtil, 38.0, accuracy: 0.001)
+        XCTAssertEqual(sdUtil, 88.0, accuracy: 0.001)
+    }
+
+    func testOldFormatTopLevelWindowsStillPopulated() throws {
+        let usage = try XCTUnwrap(ClaudeUsageReader.parse(oldFormatPayload,
+                                                          asOf: Date(timeIntervalSince1970: 1_787_763_445)))
+        XCTAssertEqual(usage.fiveHour.utilization, 38.0, accuracy: 0.001)
+        XCTAssertEqual(usage.sevenDay.utilization, 88.0, accuracy: 0.001)
+    }
+
+    // MARK: - Absent top-level windows
+
+    func testFileWithAccountsButNoTopLevelWindowsDoesNotReturnNil() throws {
+        // parse() should return a valid ClaudeUsage — missing back-compat windows are
+        // a degraded state, not a parse failure.
+        let usage = try XCTUnwrap(ClaudeUsageReader.parse(noTopLevelWindowsPayload,
+                                                          asOf: multiAccountFetchedAt))
+        XCTAssertEqual(usage.fiveHour.utilization, 0)
+        XCTAssertEqual(usage.sevenDay.utilization, 0)
+    }
+
+    func testFileWithAccountsButNoTopLevelWindowsStillDecodesAccountArray() throws {
+        let usage = try XCTUnwrap(ClaudeUsageReader.parse(noTopLevelWindowsPayload,
+                                                          asOf: multiAccountFetchedAt))
+        XCTAssertEqual(usage.accounts.count, 2)
+        XCTAssertEqual(usage.accounts[0].key, "advo")
+        XCTAssertEqual(usage.accounts[0].status, "ok")
+        XCTAssertEqual(usage.accounts[1].key, "prince")
+        XCTAssertEqual(usage.accounts[1].status, "signed_out")
+    }
+
+    // MARK: - Non-ok account statuses
+
+    func testSignedOutAccountHasNilWindows() throws {
+        let usage = try XCTUnwrap(ClaudeUsageReader.parse(noTopLevelWindowsPayload,
+                                                          asOf: multiAccountFetchedAt))
+        let prince = try XCTUnwrap(usage.accounts.first { $0.key == "prince" })
+        XCTAssertEqual(prince.status, "signed_out")
+        XCTAssertNil(prince.fiveHour)
+        XCTAssertNil(prince.sevenDay)
+    }
+
+    func testErrorStatusRoundTrips() throws {
+        let payload = Data("""
+        {
+          "fetched_at": "2026-08-31T00:00:00Z",
+          "accounts": [
+            { "key": "advo", "label": "ADVO", "status": "error", "error": "timeout" }
+          ]
+        }
+        """.utf8)
+        let usage = try XCTUnwrap(ClaudeUsageReader.parse(payload, asOf: multiAccountFetchedAt))
+        XCTAssertEqual(usage.accounts.first?.status, "error")
+        XCTAssertNil(usage.accounts.first?.fiveHour)
+    }
+
+    func testExpiredStatusRoundTrips() throws {
+        let payload = Data("""
+        {
+          "fetched_at": "2026-08-31T00:00:00Z",
+          "accounts": [
+            { "key": "prince", "label": "PRINCE", "status": "expired" }
+          ]
+        }
+        """.utf8)
+        let usage = try XCTUnwrap(ClaudeUsageReader.parse(payload, asOf: multiAccountFetchedAt))
+        XCTAssertEqual(usage.accounts.first?.status, "expired")
+    }
+
+    // MARK: - Per-account resetDisplay refresh
+
+    /// refreshed() must recompute resetDisplay for every account's windows, not just
+    /// the top-level pair. Skipping this would freeze countdowns after the first cache hit.
+    func testRefreshedRecomputesPerAccountResetDisplay() throws {
+        let usage = try XCTUnwrap(ClaudeUsageReader.parse(multiAccountPayload,
+                                                          asOf: multiAccountFetchedAt))
+        // Parse sets resetDisplay relative to multiAccountFetchedAt. Refreshing to a
+        // later time should produce a different (shorter) countdown or nil if past.
+        let fiveHoursLater = multiAccountFetchedAt.addingTimeInterval(5 * 3600 + 1)
+        let refreshed = ClaudeUsageReader.refreshed(usage, asOf: fiveHoursLater)
+
+        // The five-hour window resets_at is 2026-08-31T05:00:00Z = fetchedAt + 5h.
+        // After 5h01s, the window has rolled — resetDisplay should be nil (past reset).
+        let advo = try XCTUnwrap(refreshed.accounts.first { $0.key == "advo" })
+        XCTAssertNil(advo.fiveHour?.resetDisplay,
+                     "resetDisplay should be nil when the reset has passed")
+
+        // The seven-day window is still in the future — resetDisplay should be non-nil.
+        XCTAssertNotNil(advo.sevenDay?.resetDisplay,
+                        "seven-day resetDisplay should still count down")
+    }
+
+    func testRefreshedTopLevelAndAccountDisplayAreConsistent() throws {
+        let usage = try XCTUnwrap(ClaudeUsageReader.parse(multiAccountPayload,
+                                                          asOf: multiAccountFetchedAt))
+        let oneHourLater = multiAccountFetchedAt.addingTimeInterval(3600)
+        let refreshed = ClaudeUsageReader.refreshed(usage, asOf: oneHourLater)
+
+        // ADVO is the account with the back-compat five_hour window (8% util).
+        // Its resetDisplay should match the top-level five_hour resetDisplay.
+        let advo = refreshed.accounts.first { $0.key == "advo" }
+        XCTAssertEqual(advo?.fiveHour?.resetDisplay, refreshed.fiveHour.resetDisplay)
+    }
+}
