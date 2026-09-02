@@ -468,9 +468,17 @@ public final class LidCodePusher: @unchecked Sendable {
             )
         }
 
-        // Which account is live right now. Non-blocking: a cold cache returns nil and
-        // the dashboard just marks nothing active until the next heartbeat.
-        let activeDir = ActiveClaudeAccountReader.readStorageDir() ?? nil
+        // Which account is live right now. The reader returns three states in a nested
+        // optional and they must stay apart:
+        //
+        //   nil          — detection failed, mark nobody
+        //   .some(nil)   — the live account is the default slot, which has NO storage dir
+        //   .some(dir)   — the live account uses that dir
+        //
+        // Flattening with `?? nil` collapsed the first two, so the default account could
+        // never be marked active — it matched on nil, then got vetoed by the nil guard.
+        // Both accounts came back false on the dashboard.
+        let detectedDir: String?? = ActiveClaudeAccountReader.readStorageDir()
         let accounts = snapshot.usage?.accounts ?? []
         let accountPayloads: [LidCodeClaudeAccountPayload]? = accounts.isEmpty ? nil : accounts.map { a in
             LidCodeClaudeAccountPayload(
@@ -479,7 +487,7 @@ public final class LidCodePusher: @unchecked Sendable {
                 // 0 and let `status` carry the real story to the dashboard.
                 five_hour_utilization: percent(a.fiveHour?.utilization) ?? 0,
                 seven_day_utilization: percent(a.sevenDay?.utilization) ?? 0,
-                is_active: activeDir != nil && a.storageDir == activeDir,
+                is_active: detectedDir.map { $0 == a.storageDir } ?? false,
                 status: a.status
             )
         }

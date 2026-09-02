@@ -144,6 +144,7 @@ public enum MemoryReader {
     ///
     /// - `claude` and `claude.exe` → `Claude`
     /// - Full path with `.app/Contents/MacOS/...` → the component before `.app`
+    /// - `Brave Browser Helper (Renderer)` → `Brave Browser`
     /// - Bare binary name → returned as-is
     static func appName(from comm: String) -> String {
         // Normalise: strip leading whitespace
@@ -158,17 +159,30 @@ public enum MemoryReader {
             // Walk back from ".app" to the preceding "/" to extract the app name.
             let before = s[..<dotApp.lowerBound]
             if let slash = before.lastIndex(of: "/") {
-                return String(before[before.index(after: slash)...])
+                return helperParent(String(before[before.index(after: slash)...]))
             }
             // No slash — the whole string up to ".app" is the name.
-            return String(before)
+            return helperParent(String(before))
         }
 
         // Bare binary: take the basename.
         if s.contains("/"), let slash = s.lastIndex(of: "/") {
-            return String(s[s.index(after: slash)...])
+            return helperParent(String(s[s.index(after: slash)...]))
         }
 
-        return s
+        return helperParent(s)
+    }
+
+    /// Fold a Chromium-style helper back into the app that owns it.
+    ///
+    /// A Chromium browser runs a process per tab, so its weight lands under
+    /// `Brave Browser Helper (Renderer)` while `Brave Browser` itself shows a
+    /// rounding error — 0.43 GB listed next to 9.42 GB of helpers that the same
+    /// Cmd-Q would close. Splitting them names something you cannot act on.
+    static func helperParent(_ name: String) -> String {
+        guard let helper = name.range(of: " Helper", options: [.caseInsensitive]) else {
+            return name
+        }
+        return String(name[..<helper.lowerBound]).trimmingCharacters(in: .whitespaces)
     }
 }

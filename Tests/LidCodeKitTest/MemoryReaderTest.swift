@@ -368,3 +368,35 @@ final class MemorySettingBackwardCompatTest: XCTestCase {
         XCTAssertNil(snapshot.memory)
     }
 }
+
+/// Chromium browsers hide their real weight in helper processes. Naming a row the
+/// user cannot act on is the same as not showing it.
+final class MemoryHelperMergeTest: XCTestCase {
+    func testRendererHelperFoldsIntoTheParentApp() {
+        XCTAssertEqual(
+            MemoryReader.appName(from: "Brave Browser Helper (Renderer)"),
+            "Brave Browser")
+    }
+
+    func testGpuAndPluginHelpersFoldToo() {
+        XCTAssertEqual(MemoryReader.appName(from: "Brave Browser Helper (GPU)"), "Brave Browser")
+        XCTAssertEqual(MemoryReader.appName(from: "Google Chrome Helper"), "Google Chrome")
+    }
+
+    func testHelperInsideABundlePathAlsoFolds() {
+        XCTAssertEqual(
+            MemoryReader.appName(
+                from: "/Applications/Brave Browser.app/Contents/Frameworks/Brave Browser Helper.app/Contents/MacOS/Brave Browser Helper"),
+            "Brave Browser")
+    }
+
+    func testAnAppWhoseNameContainsHelperIsNotTruncatedWrongly() {
+        // No " Helper" boundary, so nothing to fold.
+        XCTAssertEqual(MemoryReader.appName(from: "Helperific"), "Helperific")
+    }
+
+    func testOrdinaryNamesAreUntouched() {
+        XCTAssertEqual(MemoryReader.appName(from: "Brave Browser"), "Brave Browser")
+        XCTAssertEqual(MemoryReader.appName(from: "claude.exe"), "Claude")
+    }
+}
