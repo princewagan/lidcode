@@ -807,6 +807,9 @@ function ClaudeAccountsBand({
 // Shows overall used %, swap used, pressure state, and per-app list.
 // ---------------------------------------------------------------------------
 
+/** How many per-app rows the phone shows before it stops listing. */
+const MEMORY_ROW_LIMIT = 12;
+
 function pressureColor(pressure: LidCodeMemory["pressure"]): string {
   if (pressure === "critical") return "var(--lc-error)";
   if (pressure === "warn") return "var(--lc-blocked)";
@@ -829,6 +832,13 @@ function MemoryBand({
     memory.swap_total_mb > 0
       ? Math.min(1, memory.swap_used_mb / memory.swap_total_mb)
       : 0;
+
+  // The Mac pushes every process it saw — hundreds of them. Only the heavy end
+  // is worth a phone screen, so mirror the menu and show the top consumers with
+  // a count of what was left off.
+  const allApps = memory.app ?? [];
+  const rows = [...allApps].sort((a, b) => b.mb - a.mb).slice(0, MEMORY_ROW_LIMIT);
+  const hiddenAppCount = allApps.length - rows.length;
 
   return (
     <Band
@@ -887,11 +897,11 @@ function MemoryBand({
         />
       )}
 
-      {/* Per-app list */}
-      {memory.app && memory.app.length > 0 && (
+      {/* Per-app list — heaviest first, trimmed to the top consumers */}
+      {rows.length > 0 && (
         <div style={{ marginTop: 10 }}>
           <Rule soft style={{ marginBottom: 10 }} />
-          {memory.app.map((app, i) => (
+          {rows.map((app, i) => (
             <div
               key={app.name}
               style={{
@@ -900,7 +910,7 @@ function MemoryBand({
                 alignItems: "baseline",
                 minHeight: 28,
                 borderBottom:
-                  i < memory.app!.length - 1
+                  i < rows.length - 1
                     ? "1px solid var(--lc-line-soft)"
                     : undefined,
                 paddingTop: 4,
@@ -929,6 +939,13 @@ function MemoryBand({
               </span>
             </div>
           ))}
+          {hiddenAppCount > 0 && (
+            <p style={{ margin: "10px 0 0" }}>
+              <Micro style={{ color: "var(--lc-fg-4)" }}>
+                +{hiddenAppCount} smaller
+              </Micro>
+            </p>
+          )}
         </div>
       )}
 
@@ -1028,7 +1045,13 @@ function SessionRow({
   );
 }
 
-function SessionList({ sessions }: { sessions: LidCodeSession[] }) {
+function SessionList({
+  sessions,
+  index,
+}: {
+  sessions: LidCodeSession[];
+  index: number;
+}) {
   const now = new Date();
 
   const grouped: Record<LidCodeSession["status"], LidCodeSession[]> = {
@@ -1049,7 +1072,7 @@ function SessionList({ sessions }: { sessions: LidCodeSession[] }) {
   }
 
   return (
-    <Band index={2} style={{ paddingBottom: 8 }}>
+    <Band index={index} style={{ paddingBottom: 8 }}>
       <div
         style={{
           display: "flex",
@@ -1153,7 +1176,9 @@ function DashboardShell({
       />
       <Hero state={state} />
       <MetricsGrid state={state} />
-      <SessionList sessions={state.sessions} />
+      <ClaudeAccountsBand state={state} index={2} />
+      {state.memory && <MemoryBand memory={state.memory} index={3} />}
+      <SessionList sessions={state.sessions} index={4} />
     </Screen>
   );
 }
