@@ -53,7 +53,7 @@ final class AppModel: ObservableObject {
             // Push to Supabase off the main thread (W10). Non-blocking; silent on failure.
             Task.detached { [weak self] in
                 guard let self else { return }
-                self.pusher.pushIfChanged(snapshot)
+                self.pusher.pushIfChanged(snapshot, setting: self.runtime.currentSetting)
             }
         }
         runtime.onAlert = { [weak self] message in

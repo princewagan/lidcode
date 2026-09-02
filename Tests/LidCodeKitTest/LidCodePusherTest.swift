@@ -77,6 +77,56 @@ private func makeSnapshot(
     )
 }
 
+/// A snapshot carrying the v2 extras: two Claude accounts and a memory reading.
+/// Kept separate from `makeSnapshot` so the v1 tests keep proving that the new
+/// fields are absent rather than merely empty.
+private func makeV2Snapshot(
+    memory: MemoryReading? = MemoryReading(
+        pressure: .warn,
+        usedPercent: 62.4,
+        swapUsedMegabyte: 998.56,
+        swapTotalMegabyte: 2048.0,
+        app: [
+            MemoryApp(name: "Claude", megabyte: 6297.0, count: 11),
+            MemoryApp(name: "Brave", megabyte: 5150.0, count: 8)
+        ],
+        readAt: Date()
+    ),
+    accounts: [ClaudeAccountUsage] = [
+        ClaudeAccountUsage(
+            key: "prince", label: "prince", status: "ok",
+            fiveHour: UsageWindow(utilization: 0.0, resetsAt: nil),
+            sevenDay: UsageWindow(utilization: 8.0, resetsAt: nil),
+            storageDir: nil
+        ),
+        ClaudeAccountUsage(
+            key: "advo", label: "advo", status: "ok",
+            fiveHour: UsageWindow(utilization: 100.0, resetsAt: nil),
+            sevenDay: UsageWindow(utilization: 38.0, resetsAt: nil),
+            storageDir: "/Users/test/.claude-advo"
+        )
+    ]
+) -> RuntimeSnapshot {
+    let usage = ClaudeUsage(
+        fiveHour: UsageWindow(utilization: 50.0, resetsAt: nil),
+        sevenDay: UsageWindow(utilization: 23.0, resetsAt: nil),
+        severity: "normal",
+        fetchedAt: Date(),
+        isStale: false,
+        accounts: accounts
+    )
+    return RuntimeSnapshot(
+        isAwakeHeld: true,
+        battery: .unknown,
+        thermal: ThermalReading(level: .nominal, celsius: 55.0),
+        agentSession: AgentSessionSnapshot(sessions: []),
+        usage: usage,
+        physicalLid: ClamshellReading(state: .open, readAt: Date(), isStale: false),
+        foreignBlockerCount: 0,
+        memory: memory
+    )
+}
+
 private func makeSession(
     status: AgentStatus,
     id: String = UUID().uuidString
@@ -134,7 +184,7 @@ final class LidCodePusherTest: XCTestCase {
 
         // Fire a push and confirm the Authorization header contains the unquoted secret.
         let snapshot = makeSnapshot()
-        pusher.pushIfChanged(snapshot)
+        pusher.pushIfChanged(snapshot, setting: .default)
         // Give the async queue a moment to fire.
         let expectation = expectation(description: "request sent")
         DispatchQueue.global().asyncAfter(deadline: .now() + 0.2) { expectation.fulfill() }
@@ -158,6 +208,77 @@ final class LidCodePusherTest: XCTestCase {
 
     // MARK: - Payload encoding
 
+    /// The dashboard renders one block per account, so every account has to survive
+    /// the trip — not just the aggregate the v1 payload carried.
+    func testV2PayloadCarriesEveryAccountAndMemory() throws {
+        let env = TempEnvFile(contents: "PUSH_SECRET=secret\n")
+        let stub = StubTransport()
+        let pusher = LidCodePusher(configPath: env.path, transport: stub.asTransport)
+
+        pusher.pushIfChanged(makeV2Snapshot(), setting: .default)
+
+        let e = expectation(description: "request")
+        DispatchQueue.global().asyncAfter(deadline: .now() + 0.2) { e.fulfill() }
+        wait(for: [e], timeout: 1.0)
+
+        let body = try XCTUnwrap(stub.requests.first?.httpBody)
+        let json = try XCTUnwrap(JSONSerialization.jsonObject(with: body) as? [String: Any])
+
+        XCTAssertEqual(json["schema_version"] as? Int, 2)
+
+        let accounts = try XCTUnwrap(json["claude_accounts"] as? [[String: Any]])
+        XCTAssertEqual(accounts.count, 2, "both accounts must reach the dashboard")
+        XCTAssertEqual(accounts.map { $0["key"] as? String }, ["prince", "advo"])
+        XCTAssertEqual(accounts[0]["five_hour_utilization"] as? Double, 0.0)
+        XCTAssertEqual(accounts[0]["seven_day_utilization"] as? Double, 8.0)
+        XCTAssertEqual(accounts[1]["five_hour_utilization"] as? Double, 100.0)
+        XCTAssertEqual(accounts[1]["seven_day_utilization"] as? Double, 38.0)
+        XCTAssertEqual(accounts[1]["status"] as? String, "ok")
+        XCTAssertNotNil(accounts[0]["is_active"] as? Bool)
+
+        let memory = try XCTUnwrap(json["memory"] as? [String: Any])
+        // .warn kernel level with swap at 48.8% stays .warn under the default 50/85
+        // thresholds — the swap rule raises the level, it never lowers it.
+        XCTAssertEqual(memory["pressure"] as? String, "warn")
+        XCTAssertEqual(memory["used_percent"] as? Double, 62.4)
+        XCTAssertEqual(memory["swap_used_mb"] as? Double, 998.56)
+        XCTAssertEqual(memory["swap_total_mb"] as? Double, 2048.0)
+
+        let apps = try XCTUnwrap(memory["app"] as? [[String: Any]])
+        XCTAssertEqual(apps.count, 2)
+        XCTAssertEqual(apps[0]["name"] as? String, "Claude")
+        XCTAssertEqual(apps[0]["mb"] as? Double, 6297.0)
+        XCTAssertEqual(apps[0]["count"] as? Int, 11)
+    }
+
+    /// A signed-out account has no window at all, but Zod requires a number. It must
+    /// go out as 0 with the real state in `status`, never as null.
+    func testSignedOutAccountSendsZeroNotNull() throws {
+        let env = TempEnvFile(contents: "PUSH_SECRET=secret\n")
+        let stub = StubTransport()
+        let pusher = LidCodePusher(configPath: env.path, transport: stub.asTransport)
+
+        let snapshot = makeV2Snapshot(accounts: [
+            ClaudeAccountUsage(
+                key: "prince", label: "prince", status: "signed_out",
+                fiveHour: nil, sevenDay: nil, storageDir: nil
+            )
+        ])
+        pusher.pushIfChanged(snapshot, setting: .default)
+
+        let e = expectation(description: "request")
+        DispatchQueue.global().asyncAfter(deadline: .now() + 0.2) { e.fulfill() }
+        wait(for: [e], timeout: 1.0)
+
+        let body = try XCTUnwrap(stub.requests.first?.httpBody)
+        let json = try XCTUnwrap(JSONSerialization.jsonObject(with: body) as? [String: Any])
+        let accounts = try XCTUnwrap(json["claude_accounts"] as? [[String: Any]])
+
+        XCTAssertEqual(accounts[0]["five_hour_utilization"] as? Double, 0.0)
+        XCTAssertEqual(accounts[0]["seven_day_utilization"] as? Double, 0.0)
+        XCTAssertEqual(accounts[0]["status"] as? String, "signed_out")
+    }
+
     func testPayloadSnakeCaseKeys() throws {
         let env = TempEnvFile(contents: "PUSH_SECRET=secret\n")
         let stub = StubTransport()
@@ -169,7 +290,7 @@ final class LidCodePusherTest: XCTestCase {
             fiveHourUtil: 14.0,
             sevenDayUtil: 6.5
         )
-        pusher.pushIfChanged(snapshot)
+        pusher.pushIfChanged(snapshot, setting: .default)
 
         let e = expectation(description: "request")
         DispatchQueue.global().asyncAfter(deadline: .now() + 0.2) { e.fulfill() }
@@ -178,7 +299,7 @@ final class LidCodePusherTest: XCTestCase {
         let body = try XCTUnwrap(stub.requests.first?.httpBody)
         let json = try XCTUnwrap(JSONSerialization.jsonObject(with: body) as? [String: Any])
 
-        XCTAssertEqual(json["schema_version"] as? Int, 1)
+        XCTAssertEqual(json["schema_version"] as? Int, 2)
         XCTAssertNotNil(json["pushed_at"])
         XCTAssertNotNil(json["mac_hostname"])
         XCTAssertEqual(json["awake_held"] as? Bool, true)
@@ -189,6 +310,11 @@ final class LidCodePusherTest: XCTestCase {
         XCTAssertEqual(json["claude_five_hour_utilization"] as? Double, 14.0)
         XCTAssertEqual(json["claude_seven_day_utilization"] as? Double, 6.5)
         XCTAssertNotNil(json["sessions"])
+
+        // v2 fields are omitted, not null, when the snapshot carries no reading —
+        // the Zod schema marks them optional, and a literal null fails that.
+        XCTAssertNil(json["memory"])
+        XCTAssertNil(json["claude_accounts"])
 
         // Verify no camelCase keys leaked through.
         XCTAssertNil(json["schemaVersion"])
@@ -205,7 +331,7 @@ final class LidCodePusherTest: XCTestCase {
         let stub = StubTransport()
         let pusher = LidCodePusher(configPath: env.path, transport: stub.asTransport)
 
-        pusher.pushIfChanged(makeSnapshot())
+        pusher.pushIfChanged(makeSnapshot(), setting: .default)
 
         let e = expectation(description: "request")
         DispatchQueue.global().asyncAfter(deadline: .now() + 0.2) { e.fulfill() }
@@ -231,7 +357,7 @@ final class LidCodePusherTest: XCTestCase {
             makeSession(status: .error,    id: "id-error"),
             makeSession(status: .finished, id: "id-finished"),
         ]
-        pusher.pushIfChanged(makeSnapshot(sessions: sessions))
+        pusher.pushIfChanged(makeSnapshot(sessions: sessions), setting: .default)
 
         let e = expectation(description: "request")
         DispatchQueue.global().asyncAfter(deadline: .now() + 0.2) { e.fulfill() }
@@ -256,7 +382,7 @@ final class LidCodePusherTest: XCTestCase {
         let pusher = LidCodePusher(configPath: env.path, transport: stub.asTransport)
 
         let session = makeSession(status: .running, id: "my-session-id")
-        pusher.pushIfChanged(makeSnapshot(sessions: [session]))
+        pusher.pushIfChanged(makeSnapshot(sessions: [session]), setting: .default)
 
         let e = expectation(description: "request")
         DispatchQueue.global().asyncAfter(deadline: .now() + 0.2) { e.fulfill() }
@@ -284,7 +410,7 @@ final class LidCodePusherTest: XCTestCase {
         let snapshot = makeSnapshot()
 
         // First push — should fire.
-        pusher.pushIfChanged(snapshot)
+        pusher.pushIfChanged(snapshot, setting: .default)
 
         var e1 = expectation(description: "first")
         DispatchQueue.global().asyncAfter(deadline: .now() + 0.2) { e1.fulfill() }
@@ -294,7 +420,7 @@ final class LidCodePusherTest: XCTestCase {
         XCTAssertEqual(afterFirst, 1, "First push with new state should fire")
 
         // Second push with identical snapshot (no time change for hash) — should NOT fire.
-        pusher.pushIfChanged(snapshot)
+        pusher.pushIfChanged(snapshot, setting: .default)
 
         var e2 = expectation(description: "second")
         DispatchQueue.global().asyncAfter(deadline: .now() + 0.2) { e2.fulfill() }
@@ -309,7 +435,7 @@ final class LidCodePusherTest: XCTestCase {
         let pusher = LidCodePusher(configPath: env.path, transport: stub.asTransport)
 
         // First push.
-        pusher.pushIfChanged(makeSnapshot(sessions: [makeSession(status: .running)]))
+        pusher.pushIfChanged(makeSnapshot(sessions: [makeSession(status: .running)]), setting: .default)
         let e1 = expectation(description: "first")
         DispatchQueue.global().asyncAfter(deadline: .now() + 0.2) { e1.fulfill() }
         wait(for: [e1], timeout: 1.0)
@@ -319,7 +445,7 @@ final class LidCodePusherTest: XCTestCase {
         pusher.pushIfChanged(makeSnapshot(sessions: [
             makeSession(status: .running),
             makeSession(status: .finished),
-        ]))
+        ]), setting: .default)
         let e2 = expectation(description: "second")
         DispatchQueue.global().asyncAfter(deadline: .now() + 0.2) { e2.fulfill() }
         wait(for: [e2], timeout: 1.0)
@@ -335,7 +461,7 @@ final class LidCodePusherTest: XCTestCase {
 
         // First push to establish the hash.
         let snapshot = makeSnapshot()
-        pusher.pushIfChanged(snapshot)
+        pusher.pushIfChanged(snapshot, setting: .default)
         let e1 = expectation(description: "first")
         DispatchQueue.global().asyncAfter(deadline: .now() + 0.2) { e1.fulfill() }
         wait(for: [e1], timeout: 1.0)
@@ -358,7 +484,7 @@ final class LidCodePusherTest: XCTestCase {
 
         // A second push with identical snapshot immediately after should NOT fire
         // (less than 60s elapsed).
-        pusher.pushIfChanged(snapshot)
+        pusher.pushIfChanged(snapshot, setting: .default)
         let e2 = expectation(description: "second (should be suppressed)")
         DispatchQueue.global().asyncAfter(deadline: .now() + 0.2) { e2.fulfill() }
         wait(for: [e2], timeout: 1.0)
@@ -380,12 +506,12 @@ final class LidCodePusherTest: XCTestCase {
         let pusher = LidCodePusher(configPath: env.path, transport: slowTransport)
 
         // Fire two pushes with different state before the first completes.
-        pusher.pushIfChanged(makeSnapshot(awakeHeld: true))
+        pusher.pushIfChanged(makeSnapshot(awakeHeld: true), setting: .default)
         let e1 = expectation(description: "first queued")
         DispatchQueue.global().asyncAfter(deadline: .now() + 0.1) { e1.fulfill() }
         wait(for: [e1], timeout: 1.0)
 
-        pusher.pushIfChanged(makeSnapshot(awakeHeld: false))
+        pusher.pushIfChanged(makeSnapshot(awakeHeld: false), setting: .default)
         let e2 = expectation(description: "second queued")
         DispatchQueue.global().asyncAfter(deadline: .now() + 0.1) { e2.fulfill() }
         wait(for: [e2], timeout: 1.0)
@@ -405,7 +531,7 @@ final class LidCodePusherTest: XCTestCase {
 
         XCTAssertFalse(pusher._isConfigured)
 
-        pusher.pushIfChanged(makeSnapshot())
+        pusher.pushIfChanged(makeSnapshot(), setting: .default)
         let e = expectation(description: "wait")
         DispatchQueue.global().asyncAfter(deadline: .now() + 0.2) { e.fulfill() }
         wait(for: [e], timeout: 1.0)
@@ -421,7 +547,7 @@ final class LidCodePusherTest: XCTestCase {
             let stub = StubTransport()
             let pusher = LidCodePusher(configPath: env.path, transport: stub.asTransport)
 
-            pusher.pushIfChanged(makeSnapshot(physicalLid: state))
+            pusher.pushIfChanged(makeSnapshot(physicalLid: state), setting: .default)
             let e = expectation(description: "request for \(state)")
             DispatchQueue.global().asyncAfter(deadline: .now() + 0.2) { e.fulfill() }
             wait(for: [e], timeout: 1.0)
@@ -490,19 +616,19 @@ final class LidCodePusherWedgeTest: XCTestCase {
         var sent = 0
         let pusher = LidCodePusher(configPath: try envFile()) { _, _ in sent += 1 }
 
-        pusher.pushIfChanged(makeSnapshot())
+        pusher.pushIfChanged(makeSnapshot(), setting: .default)
         pusher.drainForTest()
         XCTAssertEqual(sent, 1)
 
         // Still within the expiry window: correctly suppressed.
         pusher.forceInflightAgeForTest(10)
-        pusher.pushIfChanged(makeSnapshot())
+        pusher.pushIfChanged(makeSnapshot(), setting: .default)
         pusher.drainForTest()
         XCTAssertEqual(sent, 1, "should not double-post while a request is genuinely in flight")
 
         // Past the expiry window: must recover on its own.
         pusher.forceInflightAgeForTest(600)
-        pusher.pushIfChanged(makeSnapshot())
+        pusher.pushIfChanged(makeSnapshot(), setting: .default)
         pusher.drainForTest()
         XCTAssertEqual(sent, 2, "an abandoned request must not wedge the pusher permanently")
     }
@@ -516,12 +642,12 @@ final class LidCodePusherWedgeTest: XCTestCase {
             done(nil, HTTPURLResponse(url: URL(string: "https://example.test")!,
                                       statusCode: 400, httpVersion: nil, headerFields: nil), nil)
         }
-        pusher.pushIfChanged(makeSnapshot())
+        pusher.pushIfChanged(makeSnapshot(), setting: .default)
         pusher.drainForTest()
         XCTAssertEqual(sent, 1)
 
         pusher.forceHeartbeatDueForTest()
-        pusher.pushIfChanged(makeSnapshot())
+        pusher.pushIfChanged(makeSnapshot(), setting: .default)
         pusher.drainForTest()
         XCTAssertEqual(sent, 2, "a rejected payload must be resent, not treated as delivered")
     }
@@ -555,12 +681,12 @@ final class LidCodePushRateTest: XCTestCase {
         var sent = 0
         let p = try pusher { sent += 1 }
 
-        p.pushIfChanged(makeSnapshot(thermal: ThermalReading(level: .nominal, celsius: 55.0)))
+        p.pushIfChanged(makeSnapshot(thermal: ThermalReading(level: .nominal, celsius: 55.0)), setting: .default)
         p.drainForTest()
         XCTAssertEqual(sent, 1, "first push always goes")
 
         for c in [55.4, 55.9, 56.2, 54.8, 57.1] {
-            p.pushIfChanged(makeSnapshot(thermal: ThermalReading(level: .nominal, celsius: c)))
+            p.pushIfChanged(makeSnapshot(thermal: ThermalReading(level: .nominal, celsius: c)), setting: .default)
             p.drainForTest()
         }
         XCTAssertEqual(sent, 1, "drifting temperature must ride the heartbeat, not force a push")
@@ -575,13 +701,13 @@ final class LidCodePushRateTest: XCTestCase {
             titleSource: "ai-title", status: .running, lastEvent: "prompt_submit",
             lastSeenAt: Date(), statusChangedAt: Date())
 
-        p.pushIfChanged(makeSnapshot(sessions: [base]))
+        p.pushIfChanged(makeSnapshot(sessions: [base]), setting: .default)
         p.drainForTest()
         XCTAssertEqual(sent, 1)
 
         var blocked = base
         blocked.status = .blocked
-        p.pushIfChanged(makeSnapshot(sessions: [blocked]))
+        p.pushIfChanged(makeSnapshot(sessions: [blocked]), setting: .default)
         p.drainForTest()
         XCTAssertEqual(sent, 2, "a running -> blocked flip must go out at once")
     }
@@ -589,11 +715,11 @@ final class LidCodePushRateTest: XCTestCase {
     func testLidAndAwakeChangesPushImmediately() throws {
         var sent = 0
         let p = try pusher { sent += 1 }
-        p.pushIfChanged(makeSnapshot(awakeHeld: true, physicalLid: .open))
+        p.pushIfChanged(makeSnapshot(awakeHeld: true, physicalLid: .open), setting: .default)
         p.drainForTest()
-        p.pushIfChanged(makeSnapshot(awakeHeld: true, physicalLid: .closed))
+        p.pushIfChanged(makeSnapshot(awakeHeld: true, physicalLid: .closed), setting: .default)
         p.drainForTest()
-        p.pushIfChanged(makeSnapshot(awakeHeld: false, physicalLid: .closed))
+        p.pushIfChanged(makeSnapshot(awakeHeld: false, physicalLid: .closed), setting: .default)
         p.drainForTest()
         XCTAssertEqual(sent, 3)
     }

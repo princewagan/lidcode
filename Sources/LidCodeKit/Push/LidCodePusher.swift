@@ -6,8 +6,76 @@ import CryptoKit
 // These are the exact JSON keys the television API validates with Zod.
 // All fields are snake_case. Optional fields are omitted when nil.
 
+/// One row of the memory breakdown. `count` is how many processes were folded
+/// into the name, so the dashboard can say "Claude x11" rather than implying a
+/// single process holds 6 GB.
+public struct LidCodeMemoryAppPayload: Codable, Sendable {
+    public var name: String
+    public var mb: Double
+    public var count: Int?
+
+    public init(name: String, mb: Double, count: Int?) {
+        self.name = name
+        self.mb = mb
+        self.count = count
+    }
+}
+
+/// Memory block, v2 only. `pressure` is the *effective* level — the kernel's own
+/// reading raised by the swap thresholds the user set — not the raw kernel value,
+/// so the dashboard and the menu bar always agree on the word.
+public struct LidCodeMemoryPayload: Codable, Sendable {
+    public var pressure: String                        // "normal" | "warn" | "critical"
+    public var used_percent: Double
+    public var swap_used_mb: Double
+    public var swap_total_mb: Double
+    public var app: [LidCodeMemoryAppPayload]?
+
+    public init(
+        pressure: String,
+        used_percent: Double,
+        swap_used_mb: Double,
+        swap_total_mb: Double,
+        app: [LidCodeMemoryAppPayload]?
+    ) {
+        self.pressure = pressure
+        self.used_percent = used_percent
+        self.swap_used_mb = swap_used_mb
+        self.swap_total_mb = swap_total_mb
+        self.app = app
+    }
+}
+
+/// One Claude account, v2 only.
+///
+/// The two utilisation fields are non-optional here even though the reader leaves
+/// them nil for a signed-out account, because the Zod schema requires numbers. A
+/// missing window is sent as 0 and `status` carries the real story — the dashboard
+/// reads the status, not the zero, when deciding what to draw.
+public struct LidCodeClaudeAccountPayload: Codable, Sendable {
+    public var key: String
+    public var five_hour_utilization: Double
+    public var seven_day_utilization: Double
+    public var is_active: Bool
+    public var status: String
+
+    public init(
+        key: String,
+        five_hour_utilization: Double,
+        seven_day_utilization: Double,
+        is_active: Bool,
+        status: String
+    ) {
+        self.key = key
+        self.five_hour_utilization = five_hour_utilization
+        self.seven_day_utilization = seven_day_utilization
+        self.is_active = is_active
+        self.status = status
+    }
+}
+
 public struct LidCodePushPayload: Codable, Sendable {
-    public var schema_version: Int                     // always 1
+    public var schema_version: Int                     // 2 since the memory block landed
     public var pushed_at: String                       // ISO8601 UTC
     public var mac_hostname: String
     public var awake_held: Bool
@@ -22,6 +90,9 @@ public struct LidCodePushPayload: Codable, Sendable {
     public var claude_seven_day_utilization: Double?
     public var foreign_blocker_count: Int
     public var sessions: [LidCodeSessionPayload]
+    // v2 additions. Both omitted when nil so the schema's v1 shape still validates.
+    public var memory: LidCodeMemoryPayload?
+    public var claude_accounts: [LidCodeClaudeAccountPayload]?
 
     public init(
         schema_version: Int,
@@ -38,7 +109,9 @@ public struct LidCodePushPayload: Codable, Sendable {
         claude_five_hour_utilization: Double?,
         claude_seven_day_utilization: Double?,
         foreign_blocker_count: Int,
-        sessions: [LidCodeSessionPayload]
+        sessions: [LidCodeSessionPayload],
+        memory: LidCodeMemoryPayload? = nil,
+        claude_accounts: [LidCodeClaudeAccountPayload]? = nil
     ) {
         self.schema_version = schema_version
         self.pushed_at = pushed_at
@@ -55,6 +128,8 @@ public struct LidCodePushPayload: Codable, Sendable {
         self.claude_seven_day_utilization = claude_seven_day_utilization
         self.foreign_blocker_count = foreign_blocker_count
         self.sessions = sessions
+        self.memory = memory
+        self.claude_accounts = claude_accounts
     }
 }
 
@@ -310,18 +385,23 @@ public final class LidCodePusher: @unchecked Sendable {
 
     /// Non-blocking. Schedules the push on a background queue and returns immediately.
     /// Never throws. Errors are written to stderr only.
-    public func pushIfChanged(_ snapshot: RuntimeSnapshot) {
+    ///
+    /// `setting` is needed because the memory block reports the *effective* pressure
+    /// level, which folds the user's swap thresholds into the kernel's own reading.
+    /// Sending the raw kernel value instead would let the dashboard and the menu bar
+    /// disagree about the same machine.
+    public func pushIfChanged(_ snapshot: RuntimeSnapshot, setting: Setting) {
         queue.async { [weak self] in
-            self?.pushIfChangedOnQueue(snapshot)
+            self?.pushIfChangedOnQueue(snapshot, setting: setting)
         }
     }
 
     // MARK: - Private — all called on `queue`
 
-    private func pushIfChangedOnQueue(_ snapshot: RuntimeSnapshot) {
+    private func pushIfChangedOnQueue(_ snapshot: RuntimeSnapshot, setting: Setting) {
         guard let config else { return }
 
-        let payload = buildPayload(snapshot: snapshot, pushedAt: Date())
+        let payload = buildPayload(snapshot: snapshot, setting: setting, pushedAt: Date())
         let comparableHash = hashPayload(payload)
         let now = Date()
         let elapsed = now.timeIntervalSince(lastPushAt)
@@ -335,7 +415,7 @@ public final class LidCodePusher: @unchecked Sendable {
         guard !isInflight else { return }
 
         // Update pushed_at to current time for the actual HTTP body.
-        let finalPayload = buildPayload(snapshot: snapshot, pushedAt: now)
+        let finalPayload = buildPayload(snapshot: snapshot, setting: setting, pushedAt: now)
         guard let body = encode(finalPayload) else { return }
 
         inflightSince = now
@@ -347,7 +427,11 @@ public final class LidCodePusher: @unchecked Sendable {
         performRequest(body: body, config: config, attempt: 0, hash: comparableHash)
     }
 
-    private func buildPayload(snapshot: RuntimeSnapshot, pushedAt: Date) -> LidCodePushPayload {
+    private func buildPayload(
+        snapshot: RuntimeSnapshot,
+        setting: Setting,
+        pushedAt: Date
+    ) -> LidCodePushPayload {
         let iso = Self.iso8601
 
         let sessionPayloads = snapshot.agentSession.sessions.map { s in
@@ -363,8 +447,45 @@ public final class LidCodePusher: @unchecked Sendable {
             )
         }
 
+        // Zod rejects the whole push if a percentage strays outside 0...100, and one
+        // bad number takes every other field down with it. Clamp rather than trust.
+        func percent(_ value: Double?) -> Double? {
+            value.map { min(100, max(0, $0)) }
+        }
+
+        let memoryPayload = snapshot.memory.map { mem in
+            LidCodeMemoryPayload(
+                pressure: mem.displayLevel(
+                    warnSwapPercent: setting.memoryWarnSwapPercent,
+                    criticalSwapPercent: setting.memoryCriticalSwapPercent
+                ).pushLabel,
+                used_percent: min(100, max(0, mem.usedPercent)),
+                swap_used_mb: max(0, mem.swapUsedMegabyte),
+                swap_total_mb: max(0, mem.swapTotalMegabyte),
+                app: mem.app.isEmpty ? nil : mem.app.map {
+                    LidCodeMemoryAppPayload(name: $0.name, mb: $0.megabyte, count: $0.count)
+                }
+            )
+        }
+
+        // Which account is live right now. Non-blocking: a cold cache returns nil and
+        // the dashboard just marks nothing active until the next heartbeat.
+        let activeDir = ActiveClaudeAccountReader.readStorageDir() ?? nil
+        let accounts = snapshot.usage?.accounts ?? []
+        let accountPayloads: [LidCodeClaudeAccountPayload]? = accounts.isEmpty ? nil : accounts.map { a in
+            LidCodeClaudeAccountPayload(
+                key: a.key,
+                // A signed-out account has no window at all. Zod wants a number, so send
+                // 0 and let `status` carry the real story to the dashboard.
+                five_hour_utilization: percent(a.fiveHour?.utilization) ?? 0,
+                seven_day_utilization: percent(a.sevenDay?.utilization) ?? 0,
+                is_active: activeDir != nil && a.storageDir == activeDir,
+                status: a.status
+            )
+        }
+
         return LidCodePushPayload(
-            schema_version: 1,
+            schema_version: 2,
             pushed_at: iso.string(from: pushedAt),
             mac_hostname: hostName(),
             awake_held: snapshot.isAwakeHeld,
@@ -375,10 +496,12 @@ public final class LidCodePusher: @unchecked Sendable {
             battery_on_main: snapshot.battery.isOnMain,
             temperature_celsius: snapshot.thermal.celsius,
             temperature_stale: snapshot.thermal.isCelsiusStale,
-            claude_five_hour_utilization: snapshot.usage?.fiveHour.utilization,
-            claude_seven_day_utilization: snapshot.usage?.sevenDay.utilization,
+            claude_five_hour_utilization: percent(snapshot.usage?.fiveHour.utilization),
+            claude_seven_day_utilization: percent(snapshot.usage?.sevenDay.utilization),
             foreign_blocker_count: snapshot.foreignBlockerCount,
-            sessions: sessionPayloads
+            sessions: sessionPayloads,
+            memory: memoryPayload,
+            claude_accounts: accountPayloads
         )
     }
 
@@ -406,6 +529,13 @@ public final class LidCodePusher: @unchecked Sendable {
             var physical_lid: String
             var temperature_stale: Bool
             var sessions: [String]      // "id:status" — a status flip must go out at once
+            // The pressure *word*, never the percentages. Crossing into critical is
+            // worth a packet; drifting from 61% to 62% is the same idle chatter the
+            // temperature sensor already taught us not to send.
+            var memory_pressure: String?
+            // Account statuses only, for the same reason: a login expiring matters,
+            // a utilisation tick does not.
+            var claude_accounts: [String]?
         }
 
         let c = Significant(
@@ -414,7 +544,11 @@ public final class LidCodePusher: @unchecked Sendable {
             awake_held: payload.awake_held,
             physical_lid: payload.physical_lid,
             temperature_stale: payload.temperature_stale,
-            sessions: payload.sessions.map { "\($0.id):\($0.status)" }.sorted()
+            sessions: payload.sessions.map { "\($0.id):\($0.status)" }.sorted(),
+            memory_pressure: payload.memory?.pressure,
+            claude_accounts: payload.claude_accounts.map { list in
+                list.map { "\($0.key):\($0.status):\($0.is_active)" }.sorted()
+            }
         )
 
         let encoder = JSONEncoder()
