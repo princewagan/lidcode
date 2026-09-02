@@ -150,11 +150,24 @@ final class AppModel: ObservableObject {
         }
     }
 
+    /// True while the user is physically dragging something in the panel.
+    ///
+    /// The panel re-measures and re-frames itself on every model publish — which is every
+    /// five seconds — and a window that changes frame under a live pointer interrupts the
+    /// gesture recogniser. `AppDelegate` skips the resize while this is set.
+    @Published var isInteracting = false
+
     /// Re-arms the hold with a new duration without cycling the switch off and on. Used
     /// by the duration slider: dragging it while a session is live should extend that
     /// session, not end it.
+    ///
+    /// The returned value is assigned back to `setting`, and that assignment is the whole
+    /// point. Discarding it — which is what this used to do — left `setting.holdSecond` on
+    /// the old number until the runtime's own publish came back around, so the slider knob
+    /// snapped to where it had been before jumping to where it was dropped. `updateSetting`
+    /// computes the new value from the mirror synchronously precisely so a caller can do this.
     func setHoldSecond(_ second: Int) {
-        _ = runtime.updateSetting(SettingPatch(holdSecond: second))
+        setting = runtime.updateSetting(SettingPatch(holdSecond: second))
         guard isEnabled else { return }
         // extendHold updates the deadline without touching mode, so dragging the slider
         // during a running .smart auto-watch hold cannot silently convert it to .manual
@@ -168,6 +181,12 @@ final class AppModel: ObservableObject {
     /// than waiting up to 10s for the cache and timer to align.
     func checkLidNow() {
         runtime.checkLidNow()
+    }
+
+    /// Puts the display brightness back without waiting for a lid reading to agree that
+    /// the lid is open. Called on every wake signal — see `LidCodeRuntime.restoreBrightnessNow`.
+    func restoreBrightnessNow() {
+        runtime.restoreBrightnessNow()
     }
 
     // MARK: - Safety guards

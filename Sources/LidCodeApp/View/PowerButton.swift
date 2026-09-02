@@ -190,9 +190,23 @@ struct GuardToggle: View {
                         // end of the family rather than switching hue to say so.
                         .foregroundStyle(isOn ? Palette.brandSoft : Palette.brandDeep)
                     Spacer(minLength: 0)
-                    Circle()
-                        .fill(isOn ? Palette.brandSoft : Palette.brandDeep)
-                        .frame(width: 5, height: 5)
+                    // The word, not a coloured dot.
+                    //
+                    // A 5-point circle that changed shade was the only thing distinguishing
+                    // "this rule is protecting you" from "this rule is switched off", and
+                    // the two orange shades read as the same colour at a glance. The result
+                    // was a guard people believed was on, doing nothing — reported as the
+                    // guard not working, which from the outside is indistinguishable.
+                    Text(isOn ? "ON" : "OFF")
+                        .font(.system(size: 8, weight: .bold))
+                        .kerning(0.4)
+                        .foregroundStyle(isOn ? Color.primary.opacity(0.65) : Color.white)
+                        .padding(.horizontal, 4)
+                        .padding(.vertical, 1)
+                        .background(
+                            Capsule().fill(isOn
+                                           ? Color.primary.opacity(0.10)
+                                           : Palette.brandDeep))
                 }
                 Text(isOn ? onLabel : offLabel)
                     .font(.system(size: 10, weight: .medium))

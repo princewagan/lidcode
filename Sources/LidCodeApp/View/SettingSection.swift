@@ -79,22 +79,22 @@ struct SettingSection: View {
         HStack(spacing: 7) {
             GuardToggle(
                 isOn: setting.isBatteryGuardOn,
-                onLabel: "Stop at \(setting.softBatteryPercent)%",
-                offLabel: "Battery waived",
+                onLabel: "Sleep at \(setting.softBatteryPercent)%",
+                offLabel: "No battery floor",
                 symbolName: "battery.25",
                 detail: setting.isBatteryGuardOn
-                    ? "Releases the hold at \(setting.softBatteryPercent)% so the Mac sleeps with enough charge to resume. Click to waive it."
-                    : "Waived. The hard \(setting.hardBatteryPercent)% floor still forces sleep — that one cannot be turned off.",
+                    ? "ON. Releases the hold at \(setting.softBatteryPercent)% so the Mac sleeps with enough charge to resume. Click to switch this guard off."
+                    : "OFF. Nothing stops the run as the battery drains, except the hard \(setting.hardBatteryPercent)% floor — that one cannot be turned off. Click to switch the guard back on.",
                 onToggle: { model.setBatteryGuard($0) }
             )
             GuardToggle(
                 isOn: setting.isThermalGuardOn,
-                onLabel: "Stop when hot",
-                offLabel: "Heat waived",
+                onLabel: "Sleep when hot",
+                offLabel: "No heat limit",
                 symbolName: "thermometer.medium",
                 detail: setting.isThermalGuardOn
-                    ? "Releases the hold after \(setting.sustainedHeatSecond / 60) continuous minutes at or above \(setting.thermalCeiling.display). A brief spike is ignored. Click to waive it."
-                    : "Waived. Critical heat with the lid shut still forces sleep — there is no airflow to recover through.",
+                    ? "ON. Releases the hold after \(setting.sustainedHeatSecond / 60) continuous minutes at or above \(setting.thermalCeiling.display). A brief spike is ignored. Click to switch this guard off."
+                    : "OFF. Heat will not stop the run, except critical heat with the lid shut — there is no airflow to recover through, so that one cannot be turned off. Click to switch the guard back on.",
                 onToggle: { model.setThermalGuard($0) }
             )
         }
@@ -121,7 +121,7 @@ struct SettingSection: View {
             }
 
             HStack {
-                Text("Back off when").font(.system(size: 11))
+                Text("Too hot means").font(.system(size: 11))
                 Spacer()
                 Picker("", selection: Binding(
                     get: { setting.thermalCeiling },
@@ -176,10 +176,14 @@ struct SettingSection: View {
             ))
             .help("Presence-based detection as a fallback. `lidcode claim` is the precise path: the work says when it starts and stops.")
 
-            Toggle("Hold only while plugged in", isOn: Binding(
+            // Renamed from "Hold only while plugged in", which read as a restriction on
+            // some other feature rather than a rule about when the Mac may sleep. The
+            // label now says what happens, and the tooltip says when you would want it.
+            Toggle("Let the Mac sleep when unplugged", isOn: Binding(
                 get: { setting.isChargingOnly },
                 set: { model.updateSetting(SettingPatch(isChargingOnly: $0)) }
             ))
+            .help("OFF (normal): LidCode keeps the Mac awake on battery too, until the battery floor stops it. ON: unplugging the charger ends the hold straight away, whatever the battery level.")
 
             Toggle("Check services over the network", isOn: Binding(
                 get: { setting.isNetworkProbeOn },

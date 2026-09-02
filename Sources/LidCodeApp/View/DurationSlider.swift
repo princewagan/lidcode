@@ -5,16 +5,39 @@ import SwiftUI
 ///
 /// Snapped to 30 minutes, with a maximum of 6 hours (J6) so the intervals are well-spaced.
 ///
-/// J3 fix — smooth drag: the previous implementation committed the drag value to the model
-/// on every `onChanged` call. The model persisted it and republished on the 5-second tick,
-/// which snapped the knob back mid-drag. The fix: a `@State dragFraction` owns the knob
-/// position during drag and the model is only updated on `onEnded`. Inbound model changes
-/// are ignored while `isDragging` is true.
+/// # Why the knob used to jump, and what each fix addresses
+///
+/// Three separate defects stacked into one "glitchy" feel, and each needed its own fix.
+///
+/// **1. Teleport on grab.** The gesture mapped `value.location.x` straight to a fraction,
+/// so the instant you pressed the knob it re-centred itself under the pointer. Pressing
+/// two points left of centre moved the knob two points left before you had dragged at
+/// all. `grabOffset` records the distance between the pointer and the knob centre on the
+/// first event and subtracts it for the rest of the drag, so a grab is a grab. A press on
+/// bare track still jumps — that is a deliberate exception, because a click on a track is
+/// a request to go *there*.
+///
+/// **2. Flicker back, then forward, on release.** `onEnded` cleared the local drag state
+/// in the same frame it called `onCommit`. The commit is asynchronous (it goes through
+/// the runtime queue), so for one or more frames `second` was still the *old* value and
+/// the knob drew itself back at the old position before the new one arrived. That is the
+/// "flicker to the original spot and then to the new spot" exactly. `pendingSecond` now
+/// keeps the knob at the committed position until the model reports the value back.
+///
+/// **3. Repaint fighting the drag.** The panel re-measures and re-frames itself on every
+/// model publish, which is every five seconds. `onInteracting` lets the panel stand still
+/// while a drag is in flight.
+///
+/// The knob tracks the pointer 1:1 during a drag with no animation. Everything else — a
+/// release settling onto its step, a value changed from elsewhere — eases over 0.14s.
 struct DurationSlider: View {
     /// The committed value, in seconds. Read from the model; updated only on drag end.
     var second: Int
-    /// Called on release only — never mid-drag (J3: no per-frame disk writes or model updates).
+    /// Called on release only — never mid-drag (no per-frame disk writes or model updates).
     var onCommit: (Int) -> Void
+    /// Raised while a drag is in flight so the containing panel can stop re-laying itself
+    /// out underneath the pointer. Optional so the view stays usable on its own.
+    var onInteracting: (Bool) -> Void = { _ in }
 
     static let minimumSecond = 30 * 60
     /// Max is 6h (J6), down from 8h, so the 30-minute steps are more spaced.
@@ -22,13 +45,17 @@ struct DurationSlider: View {
     static let stepSecond = 30 * 60
     static var stepCount: Int { (maximumSecond - minimumSecond) / stepSecond }
 
-    /// Where the knob actually is while a drag is in flight, 0...1, unsnapped.
+    /// Where the knob is drawn, 0...1, when it is not simply following `second`.
     ///
-    /// J3: This local state owns the thumb position during drag. It is set on
-    /// `onChanged` and cleared on `onEnded`. While non-nil, inbound `second` changes
-    /// from the model are ignored — so the 5-second tick cannot snap the thumb back.
+    /// Non-nil in two situations: during a drag, where it is the live pointer position,
+    /// and between a release and the model echoing the committed value back, where it is
+    /// the committed position. Both are cases where `second` is the wrong thing to draw.
     @State private var dragFraction: Double?
-    /// True while a drag gesture is in flight, used to gate model-value reads.
+    /// The value handed to `onCommit` that the model has not confirmed yet. See fix 2.
+    @State private var pendingSecond: Int?
+    /// Pointer-minus-knob-centre at the moment the drag started. See fix 1.
+    @State private var grabOffset: CGFloat?
+    /// True while a drag gesture is in flight. Gates animation and the panel resize.
     @State private var isDragging = false
     /// The last step a tick was played for, so crossing a boundary fires exactly once.
     @State private var tickedStep: Int?
@@ -60,9 +87,6 @@ struct DurationSlider: View {
                 Text("6h").font(.system(size: 9)).foregroundStyle(.tertiary)
             }
         }
-        // Disable animations on the slider itself — the knob tracks the pointer directly
-        // and any SwiftUI animation layered on top fights the gesture recogniser.
-        .transaction { $0.animation = nil }
     }
 
     private var track: some View {
@@ -98,29 +122,69 @@ struct DurationSlider: View {
                     )
                     .offset(x: knobX)
             }
+            // 1:1 with the pointer while dragging — any animation there lags the finger and
+            // reads as rubber-banding. Everything else eases, so a release settling onto
+            // its step and a value changed from the CLI both glide instead of snapping.
+            .animation(isDragging ? nil : .easeOut(duration: 0.14), value: visualFraction)
             .frame(height: Self.trackHeight)
             .contentShape(Rectangle())
             .gesture(
                 DragGesture(minimumDistance: 0)
                     .onChanged { value in
-                        let raw = (value.location.x - Self.knobInset - (knobDiameter / 2)) / travel
+                        let knobCentre = Self.knobInset + (knobDiameter / 2) + (travel * visualFraction)
+                        if grabOffset == nil {
+                            // First event of this gesture. If the press landed on the knob,
+                            // remember how far off centre it was and preserve that for the
+                            // whole drag. If it landed on bare track, treat it as "go here".
+                            let delta = value.startLocation.x - knobCentre
+                            // A few points of slack past the knob edge, so a press that
+                            // just misses still counts as a grab rather than a jump.
+                            let grabRadius: CGFloat = (knobDiameter / 2) + 4
+                            grabOffset = abs(delta) <= grabRadius ? delta : 0
+                            isDragging = true
+                            onInteracting(true)
+                        }
+                        let target = value.location.x - (grabOffset ?? 0)
+                        let raw = (target - Self.knobInset - (knobDiameter / 2)) / travel
                         let clamped = min(1, max(0, raw))
-                        // J3: local drag state owns the thumb — model not touched here
-                        isDragging = true
+                        // Local drag state owns the thumb — the model is not touched here.
                         dragFraction = clamped
                         tick(for: Self.step(forFraction: clamped))
                     }
                     .onEnded { _ in
-                        // J3: commit to model only on drag end
                         let committed = Self.second(forFraction: dragFraction ?? visualFraction)
                         isDragging = false
-                        dragFraction = nil
+                        grabOffset = nil
                         tickedStep = nil
-                        if committed != second { onCommit(committed) }
+                        onInteracting(false)
+
+                        if committed == second {
+                            // Nothing to commit, so nothing will echo back. Release the
+                            // knob to the model straight away or it would sit on the
+                            // local fraction forever.
+                            withAnimation(.easeOut(duration: 0.14)) { dragFraction = nil }
+                            pendingSecond = nil
+                            return
+                        }
+                        // Hold the knob at the committed position — snapped to its step,
+                        // eased so the last few points of travel are not a jump — until
+                        // the model reports the new value back. See fix 2.
+                        pendingSecond = committed
+                        withAnimation(.easeOut(duration: 0.14)) {
+                            dragFraction = Self.fraction(forSecond: committed)
+                        }
+                        onCommit(committed)
                     }
             )
         }
         .frame(height: Self.trackHeight)
+        // The model has caught up (or moved somewhere else entirely). Either way the
+        // local override has done its job and `second` is the truth again.
+        .onChange(of: second) { _, _ in
+            guard !isDragging else { return }
+            pendingSecond = nil
+            dragFraction = nil
+        }
     }
 
     private func tickRow(travel: CGFloat) -> some View {
@@ -135,15 +199,16 @@ struct DurationSlider: View {
 
     // MARK: - Value mapping
 
-    /// Where the knob is drawn: the raw pointer position mid-drag, the committed value
-    /// otherwise. J3: while dragging, ignore inbound model updates (dragFraction wins).
+    /// Where the knob is drawn: the local override when there is one, the committed
+    /// value otherwise.
     private var visualFraction: Double {
         dragFraction ?? Self.fraction(forSecond: second)
     }
 
     /// What the readout says: always a snapped value, dragging or not.
     private var displayedSecond: Int {
-        dragFraction.map(Self.second(forFraction:)) ?? Self.clamped(second)
+        if let pendingSecond, !isDragging { return pendingSecond }
+        return dragFraction.map(Self.second(forFraction:)) ?? Self.clamped(second)
     }
 
     static func clamped(_ second: Int) -> Int {

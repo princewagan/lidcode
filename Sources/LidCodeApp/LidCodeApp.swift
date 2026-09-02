@@ -220,10 +220,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // ── Layout constants ──────────────────────────────────────────────────────
         let barH: CGFloat = 18           // status bar item height
         let iconSize: CGFloat = 14       // SF Symbol point size
+        let maxIconH: CGFloat = 15       // ceiling on a symbol's drawn height
         let badgeDiam: CGFloat = 14      // badge circle diameter
         let pctFont = NSFont.monospacedDigitSystemFont(ofSize: 11, weight: .medium)
         let gap: CGFloat = 3             // space between elements
-        let scale: CGFloat = 2           // Retina scale
 
         // Determine which elements are visible
         let showIcon = content.showStateIcon
@@ -239,9 +239,49 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             warnKind = nil
         }
 
+        /// Render an SF Symbol tinted, and report the size it should actually be drawn at.
+        ///
+        /// SF Symbols are not square. `thermometer.medium` is tall and narrow;
+        /// `laptopcomputer.slash` is short and wide. Both were being drawn into a fixed
+        /// 14×14 rect, and `NSImage.draw(in:)` scales to *fill* — so the thermometer was
+        /// stretched sideways to more than its natural width and the laptop was squashed.
+        /// That is the widened, slightly wrong-looking temperature icon.
+        ///
+        /// Taking the size from the configured image keeps every glyph at its own aspect
+        /// ratio, and returning it lets the measuring pass reserve exactly that width
+        /// instead of assuming a square. Height is capped so an unusually tall symbol
+        /// cannot outgrow the bar.
+        func symbol(_ name: String, color: NSColor) -> (image: NSImage, size: NSSize)? {
+            guard let raw = NSImage(systemSymbolName: name, accessibilityDescription: nil)
+            else { return nil }
+            let config = NSImage.SymbolConfiguration(pointSize: iconSize, weight: .medium)
+                .applying(NSImage.SymbolConfiguration(paletteColors: [color]))
+            guard let tinted = raw.withSymbolConfiguration(config) else { return nil }
+            var size = tinted.size
+            guard size.width > 0, size.height > 0 else { return nil }
+            if size.height > maxIconH {
+                size = NSSize(width: size.width * (maxIconH / size.height), height: maxIconH)
+            }
+            return (tinted, size)
+        }
+
+        // Built before measuring, because the width each one needs is a property of the
+        // glyph rather than a constant we can assume.
+        let stateSymbol = showIcon
+            ? symbol(content.icon.symbolName, color: .labelColor)
+            : nil
+        let warnSymbol: (image: NSImage, size: NSSize)? = {
+            guard let warn = warnKind else { return nil }
+            switch warn {
+            case .tempNonBlocking: return symbol("thermometer.medium", color: .systemOrange)
+            case .tempBlocking:    return symbol("thermometer.medium", color: .systemRed)
+            case .batteryBlocking: return symbol("battery.25", color: .systemRed)
+            }
+        }()
+
         // ── Measure total width ───────────────────────────────────────────────────
         var width: CGFloat = 4  // leading padding
-        if showIcon { width += iconSize + gap }
+        if let stateSymbol { width += stateSymbol.size.width + gap }
         if showPct {
             let pctStr = content.percentText!
             let pctW = (pctStr as NSString).size(withAttributes: [.font: pctFont]).width
@@ -250,7 +290,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         if showActive { width += badgeDiam + gap }
         if showBlocked { width += badgeDiam + gap }
         if showError { width += badgeDiam + gap }
-        if warnKind != nil { width += iconSize + gap }
+        if let warnSymbol { width += warnSymbol.size.width + gap }
         width += 2  // trailing padding
         width = max(width, 16)
 
@@ -263,25 +303,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         var x: CGFloat = 4
 
-        // Helper: draw an SF Symbol tinted to a specific colour inside lockFocusFlipped.
-        // NSImage.draw(in:) does not consult the current AppKit fill/stroke colour, so
-        // the correct way to produce a coloured symbol is to use the symbol configuration
-        // API to pre-bake the tint, then draw the resulting image normally.
-        func drawSymbol(_ name: String, color: NSColor, rect: NSRect) {
-            let config = NSImage.SymbolConfiguration(paletteColors: [color])
-            if let raw = NSImage(systemSymbolName: name, accessibilityDescription: nil),
-               let tinted = raw.withSymbolConfiguration(config) {
-                tinted.draw(in: rect)
-            }
+        // Draw a pre-tinted symbol at its own size, vertically centred in the bar.
+        // `NSImage.draw(in:)` does not consult the current AppKit fill colour, which is
+        // why the tint is baked in by `symbol(_:color:)` above rather than set here.
+        func draw(_ rendered: (image: NSImage, size: NSSize)) {
+            let rect = NSRect(
+                x: x,
+                y: (barH - rendered.size.height) / 2,
+                width: rendered.size.width,
+                height: rendered.size.height)
+            rendered.image.draw(in: rect)
+            x += rendered.size.width + gap
         }
 
         // State icon — adaptive foreground colour (white in dark menu bar, black in light).
         // labelColor is the correct menu-bar foreground: black on light bar, white on dark.
-        if showIcon {
-            let iconRect = NSRect(x: x, y: (barH - iconSize) / 2, width: iconSize, height: iconSize)
-            drawSymbol(content.icon.symbolName, color: .labelColor, rect: iconRect)
-            x += iconSize + gap
-        }
+        if let stateSymbol { draw(stateSymbol) }
 
         // Percent text
         if showPct, let pctStr = content.percentText {
@@ -332,18 +369,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // Warning icon — one slot only (H1-H4).
         // Rendered in the specific warning colour using symbol configuration, not as a
         // template, so the orange/red survives the menu bar's monochrome flatten.
-        if let warn = warnKind {
-            let (warnSymbol, warnColor): (String, NSColor) = {
-                switch warn {
-                case .tempNonBlocking: return ("thermometer.medium", NSColor.systemOrange)
-                case .tempBlocking:    return ("thermometer.medium", NSColor.systemRed)
-                case .batteryBlocking: return ("battery.25", NSColor.systemRed)
-                }
-            }()
-            let warnRect = NSRect(x: x, y: (barH - iconSize) / 2, width: iconSize, height: iconSize)
-            drawSymbol(warnSymbol, color: warnColor, rect: warnRect)
-            _ = scale  // Retina scale used when this image is composited into the bar
-        }
+        if let warnSymbol { draw(warnSymbol) }
 
         img.unlockFocus()
 
@@ -367,6 +393,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             .receive(on: RunLoop.main)
             .sink { [weak self] _ in
                 guard let self, controller.isVisible else { return }
+                // Never re-frame the window while the user is dragging inside it. The
+                // publish that drives this fires every five seconds regardless of whether
+                // anything about the panel's *height* changed, and a `setFrame` under a
+                // live pointer interrupts the gesture — which is half of why the duration
+                // slider felt like it was fighting back.
+                guard !self.model.isInteracting else { return }
                 controller.resize(anchoredTo: self.statusItem?.button)
             }
     }
@@ -521,10 +553,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     @objc private func machineDidWake(_ notification: Notification) {
+        // See `screensDidWake` for why this is outside the re-entrancy guard.
+        model.restoreBrightnessNow()
         wakeUp()
     }
 
     @objc private func screensDidWake(_ notification: Notification) {
+        // Brightness first, and outside the re-entrancy guard below.
+        //
+        // `wakeUp()` refuses to run twice in the same cycle, and a Mac routinely fires
+        // `didWake` and `screensDidWake` together — so whichever arrives second is
+        // dropped. That is fine for re-scanning sensors, which only needs doing once, and
+        // wrong for the brightness restore, which is the one thing the user is looking
+        // straight at while they wait for it. It is idempotent and cheap, so it runs on
+        // every signal.
+        model.restoreBrightnessNow()
+
         // Screen geometry changed. Run the same recovery as a full wake — the panel
         // placement may be stale, and sensors may need re-scanning.
         wakeUp()

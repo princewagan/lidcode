@@ -77,11 +77,18 @@ struct MenuView: View {
             Spacer(minLength: 6)
 
             if snapshot.isAwakeHeld {
-                Text(elapsedDisplay)
+                // Time *left*, not time served.
+                //
+                // The header showed elapsed minutes, which answers a question nobody has
+                // at 1am. The one that matters is whether the timer you set is still
+                // running and how much of it is left — and a countdown that visibly moves
+                // is also the only way to tell a working timer from a stuck one without
+                // reading the log.
+                Text(remainingDisplay)
                     .font(.system(size: 11, weight: .medium).monospacedDigit())
                     .foregroundStyle(.secondary)
                     // Fixed width so digit changes don't shift the layout
-                    .frame(minWidth: 32, alignment: .trailing)
+                    .frame(minWidth: 44, alignment: .trailing)
             }
         }
         .frame(height: 18)
@@ -131,7 +138,9 @@ struct MenuView: View {
         return "Held by \(snapshot.activeLease.prefix(3).joined(separator: ", "))"
     }
 
-    private var elapsedDisplay: String {
+    /// "2h 14m left" while a timer is running, elapsed time when the hold has no deadline.
+    private var remainingDisplay: String {
+        if let remaining = snapshot.remainingDisplay { return remaining.caption }
         let second = snapshot.runtimeSecond
         return second < 3600
             ? "\(second / 60)m"
@@ -152,7 +161,20 @@ struct MenuView: View {
             )
 
             if !model.isHelperReady { helperRow }
-            if let alert = model.alert { alertRow(alert) }
+            // Only when `warningRow` has nothing to say.
+            //
+            // The two rows have overlapping sources: `warningRow` reads the hardware
+            // directly, while `alert` carries whatever the governor last announced — and
+            // for a hot Mac the governor announces the heat. So the panel printed
+            // "Thermal pressure Serious. Check airflow" and, two rows down, "Temp is high
+            // — cool your Mac": one fact, twice, in two different voices.
+            //
+            // `warningRow` wins because it is derived from the current reading rather than
+            // from the last event, so it cannot go stale. `alert` still gets the rows
+            // `warningRow` cannot produce — a lost helper, a dead CLI socket — and it
+            // still fires the notification either way, which is the part that matters when
+            // nobody is looking at the panel.
+            if warningText == nil, let alert = model.alert { alertRow(alert) }
         }
     }
 
@@ -251,9 +273,13 @@ struct MenuView: View {
             }
         }
 
-        // G1: non-blocking high temp
+        // G1: non-blocking high temp. One sentence, with the reading in it, so this row
+        // and the temperature bar directly above it cannot appear to disagree.
         if thermal.level >= .serious {
-            return "Temp is high — cool your Mac"
+            if let celsius = thermal.celsius {
+                return "Running hot at \(Int(celsius.rounded()))° — check airflow"
+            }
+            return "Running hot — check airflow"
         }
 
         return nil
@@ -328,9 +354,15 @@ struct MenuView: View {
                     isActive: false)
             } else {
                 ForEach(usage.accounts, id: \.key) { acct in
-                    let trailing: String? = usage.isStale
-                        ? "stale"
-                        : acct.fiveHour?.resetDisplay.map { "resets in \($0)" }
+                    // A carried-forward reading says how old it is, in place of the reset
+                    // countdown. The fetcher reuses the last good numbers when a poll
+                    // fails, which is what stopped a dropped connection from blanking the
+                    // row — but numbers reused without a date on them are a quiet lie.
+                    let trailing: String? = acct.carriedAgeDisplay()
+                        .map { "from \($0)" }
+                        ?? (usage.isStale
+                            ? "stale"
+                            : acct.fiveHour?.resetDisplay.map { "resets in \($0)" })
                     // An account is active when detection succeeded and its storageDir
                     // matches the detected config dir (nil matches the default account).
                     let isActive: Bool = {
@@ -417,8 +449,12 @@ struct MenuView: View {
 
     @ViewBuilder
     private var sliderSection: some View {
-        // Only show when there's something to time (mode is relevant to the user)
-        DurationSlider(second: setting.holdSecond) { model.setHoldSecond($0) }
+        DurationSlider(
+            second: setting.holdSecond,
+            onCommit: { model.setHoldSecond($0) },
+            // Freezes the panel's own re-layout for the duration of the drag. Without it
+            // the five-second publish re-measures and re-frames the window mid-gesture.
+            onInteracting: { model.isInteracting = $0 })
     }
 
     // MARK: - Session list (C1, C2, C11)
