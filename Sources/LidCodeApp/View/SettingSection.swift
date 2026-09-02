@@ -55,6 +55,8 @@ struct SettingSection: View {
                 Divider().opacity(0.5)
                 behaviour
                 Divider().opacity(0.5)
+                memory
+                Divider().opacity(0.5)
                 menuBarSection
             }
         }
@@ -217,6 +219,49 @@ struct SettingSection: View {
     /// Six toggles controlling which elements appear in the menu bar.
     /// All default to enabled (I2). Each toggle hides its element only — it never
     /// disables the underlying feature.
+    /// Memory is display-only — nothing here can end a hold, so these are all about
+    /// when to *say* something rather than when to act.
+    ///
+    /// The two thresholds are swap percentages, not memory percentages. Free memory
+    /// stays misleadingly high while the compressor works; swap is what actually
+    /// correlates with the machine feeling slow.
+    private var memory: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Toggle("Warn about memory pressure", isOn: Binding(
+                get: { setting.isMemoryWarningOn },
+                set: { model.updateSetting(SettingPatch(isMemoryWarningOn: $0)) }
+            ))
+            .font(.system(size: 11))
+            .help("Adds a memory row to the panel and a chip icon to the menu bar. Never ends a hold.")
+
+            if setting.isMemoryWarningOn {
+                Stepper(value: Binding(
+                    get: { setting.memoryWarnSwapPercent },
+                    set: { model.updateSetting(SettingPatch(memoryWarnSwapPercent: $0)) }
+                ), in: Setting.memoryWarnSwapRange, step: 5) {
+                    row("Warn at swap", "\(setting.memoryWarnSwapPercent)%",
+                        help: "Orange chip. The kernel's own pressure level still counts — this only raises it, never lowers it.")
+                }
+
+                Stepper(value: Binding(
+                    get: { setting.memoryCriticalSwapPercent },
+                    set: { model.updateSetting(SettingPatch(memoryCriticalSwapPercent: $0)) }
+                ), in: Setting.memoryCriticalSwapRange, step: 5) {
+                    row("Critical at swap", "\(setting.memoryCriticalSwapPercent)%",
+                        help: "Red chip. Kept above the warn threshold automatically.")
+                }
+
+                Stepper(value: Binding(
+                    get: { setting.memoryAppRowCount },
+                    set: { model.updateSetting(SettingPatch(memoryAppRowCount: $0)) }
+                ), in: Setting.memoryAppRowRange, step: 1) {
+                    row("Apps listed", "\(setting.memoryAppRowCount)",
+                        help: "How many of the biggest apps the panel names.")
+                }
+            }
+        }
+    }
+
     private var menuBarSection: some View {
         VStack(alignment: .leading, spacing: 4) {
             Text("MENU BAR ICONS".uppercased())

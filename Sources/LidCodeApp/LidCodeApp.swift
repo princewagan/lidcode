@@ -101,6 +101,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             case tempNonBlocking    // orange thermometer
             case tempBlocking       // red thermometer
             case batteryBlocking    // red battery
+            case memoryWarn         // orange chip
+            case memoryCritical     // red chip
         }
 
         init(_ snapshot: RuntimeSnapshot, setting: Setting) {
@@ -165,6 +167,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 }
             } else if thermal.level >= .serious {
                 warningKind = .tempNonBlocking
+            } else if setting.isMemoryWarningOn,
+                      let mem = snapshot.memory,
+                      case let level = mem.displayLevel(
+                          warnSwapPercent: setting.memoryWarnSwapPercent,
+                          criticalSwapPercent: setting.memoryCriticalSwapPercent),
+                      level > .normal {
+                // Ranked below heat and battery on purpose. Those two can end a hold and
+                // cost you the run; memory only makes the machine slow. When the Mac is
+                // both hot and swapping, the reason it might stop is the one worth the
+                // single warning slot.
+                warningKind = level >= .critical ? .memoryCritical : .memoryWarn
             } else {
                 warningKind = nil
             }
@@ -276,6 +289,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             case .tempNonBlocking: return symbol("thermometer.medium", color: .systemOrange)
             case .tempBlocking:    return symbol("thermometer.medium", color: .systemRed)
             case .batteryBlocking: return symbol("battery.25", color: .systemRed)
+            case .memoryWarn:      return symbol("memorychip.fill", color: .systemOrange)
+            case .memoryCritical:  return symbol("memorychip.fill", color: .systemRed)
             }
         }()
 
