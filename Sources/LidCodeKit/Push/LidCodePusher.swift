@@ -605,8 +605,18 @@ public final class LidCodePusher: @unchecked Sendable {
                     Self.log("HTTP \(http.statusCode) — accepted")
                     self.lastPushedHash = hash   // accepted — safe to suppress identical resends
                 case 400...499:
-                    // 4xx: not retryable (client-side problem).
-                    Self.log("HTTP \(http.statusCode) — not retrying.")
+                    // 4xx is not retryable — the body is wrong, and sending the same
+                    // bytes again cannot make it right.
+                    //
+                    // Record the hash anyway. It is not an acknowledgement; it is what
+                    // stops the resend. Leaving it unset means `stateChanged` stays true
+                    // against the old hash, so the next tick rebuilds the identical
+                    // rejected payload and posts it again — every 5 seconds, forever.
+                    // A deployed schema one version behind the app turned that into 12
+                    // rejected POSTs a minute. The 60-second heartbeat still retries, so
+                    // the dashboard recovers on its own the moment the server catches up.
+                    Self.log("HTTP \(http.statusCode) — not retrying until the next heartbeat.")
+                    self.lastPushedHash = hash
                 default:
                     // 5xx / unexpected: retry with backoff.
                     Self.log("HTTP \(http.statusCode) (attempt \(attempt)) — retrying.")
