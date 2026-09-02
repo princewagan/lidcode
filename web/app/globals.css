@@ -1,0 +1,205 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/*
+ * Warp Monitor is dark-only on purpose.
+ *
+ * It is a companion to a terminal, and Warp itself has no light chrome in the
+ * way this app presents it. Forcing dark removes ~200 `dark:` variant classes,
+ * guarantees the design ships exactly as drawn, and makes native form controls
+ * (the password field) render dark via `color-scheme`.
+ */
+:root {
+  color-scheme: dark;
+
+  --background: #07080a;
+  --foreground: #e6e8ec;
+}
+
+html {
+  background-color: var(--background);
+}
+
+body {
+  background-color: var(--background);
+  color: var(--foreground);
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+
+  /* No blue flash on tap; every interactive element supplies its own
+     :active treatment instead. */
+  -webkit-tap-highlight-color: transparent;
+
+  /* Safety net for unbreakable strings (session ids, JSON blobs, paths without
+     separators). Only affects text that would otherwise overflow its box, so
+     normal wrapping is unchanged. Deliberately NOT `overflow-x: hidden` on
+     html/body, which would break the sticky header. */
+  overflow-wrap: break-word;
+}
+
+/* Safe area insets for iPhone notch / home bar */
+.safe-top {
+  padding-top: env(safe-area-inset-top);
+}
+.safe-bottom {
+  padding-bottom: calc(env(safe-area-inset-bottom) + 1.5rem);
+}
+
+/* Hairline separators between rows. 1px borders at 3x DPR read as heavy, so
+   rows are divided with a low-alpha inset line — the Warp treatment. */
+.row-divide > * + * {
+  box-shadow: inset 0 1px 0 rgb(255 255 255 / 0.05);
+}
+
+/* Focus rings only for keyboard users; touch never shows them. */
+.focus-ring:focus-visible {
+  outline: 2px solid #38bdf8;
+  outline-offset: -2px;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.001ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.001ms !important;
+    scroll-behavior: auto !important;
+  }
+}
+
+/* ==========================================================================
+   LidCode (/lidcode) — scoped, additive. Nothing below touches WarpMonitor.
+
+   Aesthetic: pure black, white, thin white lines. Helvetica Neue Light with
+   hard negative tracking so letters almost touch, set against 10px uppercase
+   micro-labels with wide tracking. Film title card, not a settings screen.
+
+   Everything is namespaced under `.lc-scope`, which app/lidcode/layout.tsx
+   wraps around the route. `:has()` is used only to repaint html/body — if a
+   browser lacks it the page still renders black, you just get #07080a in the
+   iOS rubber-band overscroll area.
+   ========================================================================== */
+
+html:has(.lc-scope),
+body:has(.lc-scope) {
+  background: #000;
+}
+
+.lc-scope {
+  /* One place to retune the whole page. */
+  --lc-line: rgba(255, 255, 255, 0.12); /* primary structural hairline */
+  --lc-line-soft: rgba(255, 255, 255, 0.07); /* subordinate row divider */
+  /* Alpha values are set by measured contrast, not by eye. Composited on #000:
+       0.55 -> 6.3:1  secondary copy
+       0.46 -> 4.6:1  every 10px label that carries information (WCAG AA floor)
+       0.40 -> 3.7:1  BELOW AA, so it is restricted to marks that are purely
+                      decorative or that duplicate adjacent text: the "/"
+                      separator and the per-group count digits.
+     Dimmer than this looks moodier in a screenshot and is unreadable outdoors,
+     which is the actual use case for a phone dashboard. */
+  --lc-fg: #fff;
+  --lc-fg-2: rgba(255, 255, 255, 0.55); /* secondary copy */
+  --lc-fg-3: rgba(255, 255, 255, 0.46); /* micro-labels */
+  --lc-fg-4: rgba(255, 255, 255, 0.4); /* furniture */
+
+  /* Status accents — the only colour allowed on the page. */
+  --lc-running: #4b8dff;
+  --lc-blocked: #e0b437;
+  --lc-error: #ff4d4d;
+  --lc-finished: rgba(255, 255, 255, 0.3);
+
+  /* Brand accent — matches Palette.brand (#D97757) in the Mac app.
+     Usage bars, memory meters, and the active-account marker use this colour.
+     Above 90 % utilisation the deeper variant is used; below 70 % it fades
+     to a muted grey, exactly as the Mac app's Palette.usageColor does. */
+  --lc-accent: #d97757;
+  --lc-accent-deep: #b85e3e; /* >90 % — hotter */
+  --lc-accent-soft: rgba(255, 255, 255, 0.30); /* <70 % — muted */
+
+  --lc-font: "Helvetica Neue", "HelveticaNeue", Helvetica, "Inter Tight", Inter,
+    "Segoe UI", Arial, sans-serif;
+
+  font-family: var(--lc-font);
+  /* Body tracking. The single most important detail: letters nearly touch. */
+  letter-spacing: -0.028em;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  /* Kerning on, ligatures off — ligatures fight tight tracking at large sizes. */
+  font-kerning: normal;
+  font-variant-ligatures: none;
+}
+
+/* Display type: bigger size, tighter tracking. Set by data attribute so the
+   relationship between scale and tracking lives in CSS, not scattered inline. */
+.lc-scope [data-lc-display] {
+  font-weight: 300;
+  line-height: 0.92;
+  letter-spacing: -0.045em;
+}
+.lc-scope [data-lc-display="hero"] {
+  font-weight: 300;
+  letter-spacing: -0.068em; /* 76px — the A and W visibly overlap */
+}
+.lc-scope [data-lc-display="metric"] {
+  letter-spacing: -0.055em;
+}
+
+/* Sentence-case titles in the session index. Tighter than body because they
+   are the largest run of real words on the page. */
+.lc-scope [data-lc-title] {
+  font-size: 15px;
+  line-height: 1.28;
+  letter-spacing: -0.042em;
+}
+
+/* Micro-label: 10px uppercase, wide tracking. The counterweight to the
+   display type — the contrast between the two is what reads as cinematic. */
+.lc-scope [data-lc-micro] {
+  font-size: 10px;
+  line-height: 1.2;
+  font-weight: 500;
+  text-transform: uppercase;
+  letter-spacing: 0.16em;
+  color: var(--lc-fg-3);
+}
+
+/* Two-line title clamp — a truncated sentence title is a worse read than a
+   wrapped one on a phone. */
+.lc-clamp-2 {
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+
+/* One orchestrated page-load reveal, staggered per section. Killed entirely by
+   the prefers-reduced-motion block above (fill mode `both` keeps end state). */
+@keyframes lc-rise {
+  from {
+    opacity: 0;
+    transform: translate3d(0, 10px, 0);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+.lc-rise {
+  animation: lc-rise 560ms cubic-bezier(0.16, 0.84, 0.44, 1) both;
+}
+
+/* Hairline that bleeds past the 20px gutter to the physical screen edge. */
+.lc-bleed {
+  margin-left: -20px;
+  margin-right: -20px;
+}
+
+/* Monospaced digits — applied to every changing number to prevent layout jitter
+   as single- vs. multi-digit values swap in. Matches the Mac app's
+   `.monospacedDigit()` modifier. */
+.lc-mono {
+  font-variant-numeric: tabular-nums;
+  font-feature-settings: "tnum";
+}

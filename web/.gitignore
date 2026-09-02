@@ -1,0 +1,33 @@
+# Dependencies
+node_modules/
+
+# Next.js build output
+.next/
+out/
+
+# Environment files — NEVER commit these
+.env.local
+.env*.local
+
+# Vercel
+.vercel
+
+# TypeScript
+*.tsbuildinfo
+next-env.d.ts
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Mac app build artifacts (mac-app/ folder is tracked in git but build outputs are not)
+mac-app/build/
+mac-app/*.xcarchive
+mac-app/DerivedData/
+mac-app/.build/
+mac-app/.swiftpm/
+.build/
+Package.resolved
+
+# Assembled .app bundle (build output — drag to /Applications to install)
+mac-app/*.app/

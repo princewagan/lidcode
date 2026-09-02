@@ -1,0 +1,3 @@
+# Vercel root directory is set to web/ in the project settings.
+# Paths here are relative to web/ — the repo root is not visible to Vercel.
+# Nothing extra to exclude; Next.js build output (.next/) is excluded by default.
