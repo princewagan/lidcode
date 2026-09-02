@@ -56,7 +56,14 @@ public final class ClamshellStateReader: @unchecked Sendable {
     // MARK: - Constants
 
     /// Cache a reading for this many seconds before re-running ioreg.
-    private static let cacheTTL: TimeInterval = 5
+    ///
+    /// Longer than the runtime's 5-second tick, deliberately. At 5s the TTL and the tick
+    /// were the same length, so essentially every tick missed the cache and spawned an
+    /// `ioreg` — a subprocess with a 3-second timeout, on the serial queue that also owns
+    /// the safety loop. Nothing depends on this being sampled that often: both events
+    /// that actually matter (the screens sleeping, the screens waking) call `invalidate()`
+    /// and read straight through, so the poll is a slow backstop rather than the detector.
+    private static let cacheTTL: TimeInterval = 15
 
     /// A reading older than this is marked stale in `ClamshellReading.isStale`.
     private static let staleAfter: TimeInterval = 30

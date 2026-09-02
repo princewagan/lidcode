@@ -185,7 +185,13 @@ final class SettingCompatibilityTest: XCTestCase {
 
     func testEmptyObjectDecodesToTheDefault() throws {
         let setting = try JSONDecoder().decode(Setting.self, from: Data("{}".utf8))
-        XCTAssertEqual(setting, .default)
+        // Every field falls back to its default — except `settingVersion`, which reads a
+        // file with no version key as the pre-versioning format so `migrated()` still
+        // runs. Expressed as an expected value rather than by dropping the field from
+        // the comparison, so the other twenty stay under full equality.
+        var expected = Setting.default
+        expected.settingVersion = 1
+        XCTAssertEqual(setting, expected)
     }
 
     func testRoundTripsThroughItsOwnEncoder() throws {

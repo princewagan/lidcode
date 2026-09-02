@@ -6,6 +6,11 @@ import XCTest
 final class SafetyGovernorTest: XCTestCase {
     private let governor = SafetyGovernor(setting: .default)
 
+    /// Derived rather than hardcoded: this is about the band below the soft floor, not
+    /// about any particular percentage, and hardcoding the number is what broke this
+    /// test when the shipped default moved.
+    private let floor = Setting.default.softBatteryPercent
+
     private func battery(_ percent: Int?, onMain: Bool = false) -> BatteryReading {
         BatteryReading(percent: percent, isCharging: onMain, isOnMain: onMain)
     }
@@ -21,7 +26,7 @@ final class SafetyGovernorTest: XCTestCase {
 
     func testSoftFloorReleasesBeforeHardFloorForcesSleep() {
         let soft = governor.evaluate(
-            battery: battery(18),
+            battery: battery(floor - 5),
             thermal: ThermalReading(level: .nominal),
             isClamshellActive: true
         )

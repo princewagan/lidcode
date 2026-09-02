@@ -52,6 +52,11 @@ final class HealthStateTest: XCTestCase {
 }
 
 final class HealthProbeLocalTest: XCTestCase {
+    /// Derived rather than hardcoded: the battery checks below are about the band under
+    /// the soft floor, not about any particular percentage, and hardcoding the number is
+    /// what broke them when the shipped default moved.
+    private let floor = Setting.default.softBatteryPercent
+
     private func context(_ mutate: (inout HealthContext) -> Void = { _ in }) -> HealthContext {
         var context = HealthContext(isSocketBound: true, setting: .default)
         mutate(&context)
@@ -140,16 +145,16 @@ final class HealthProbeLocalTest: XCTestCase {
 
     func testBatteryBelowSoftFloorIsDegraded() {
         let check = HealthProbe.deviceCheck(context: context {
-            $0.battery = BatteryReading(percent: 15, isCharging: false, isOnMain: false)
+            $0.battery = BatteryReading(percent: floor - 5, isCharging: false, isOnMain: false)
         })
         XCTAssertEqual(check.first { $0.id == "device.battery" }?.state, .degraded)
     }
 
-    /// The soft floor only ends a run on battery — plugged in at 15% is heading up,
-    /// not down, so it must not read as a problem.
+    /// The soft floor only ends a run on battery — plugged in below it the charge is
+    /// heading up, not down, so it must not read as a problem.
     func testLowBatteryOnMainsIsFine() {
         let check = HealthProbe.deviceCheck(context: context {
-            $0.battery = BatteryReading(percent: 15, isCharging: true, isOnMain: true)
+            $0.battery = BatteryReading(percent: floor - 5, isCharging: true, isOnMain: true)
         })
         XCTAssertEqual(check.first { $0.id == "device.battery" }?.state, .ok)
     }

@@ -1,6 +1,15 @@
 import XCTest
 @testable import LidCodeKit
 
+/// Derived rather than hardcoded: these tests are about the bands either side of the
+/// soft battery floor, not about any particular percentage, and hardcoding the number is
+/// what broke them when the shipped default moved.
+///
+/// The bands are the governor's own, from `SafetyGovernor.evaluate`: below `floor` is a
+/// release, `floor` through `floor + 9` is the warn band, and `floor + 10` upwards is
+/// `.proceed` — the only verdict that lifts the safety lock.
+private let floor = Setting.default.softBatteryPercent
+
 /// Regression coverage for the flap: the soft battery floor released the hold, and
 /// auto-watch re-acquired it ~10s later because the watched processes were obviously
 /// still running — so the floor never actually let the Mac sleep. Observed live as the
@@ -11,7 +20,7 @@ import XCTest
 /// there: a release must not be followed by a `.proceed` until conditions have
 /// genuinely recovered, or the lock would lift straight back into the same release.
 final class SafetyHysteresisTest: XCTestCase {
-    private let setting = Setting.default          // soft 20, hard 4
+    private let setting = Setting.default          // soft floor, hard 4
     private var governor: SafetyGovernor { SafetyGovernor(setting: setting) }
 
     private func battery(_ percent: Int, isOnMain: Bool = false) -> BatteryReading {
@@ -26,13 +35,13 @@ final class SafetyHysteresisTest: XCTestCase {
     }
 
     func testBelowSoftFloorReleases() {
-        XCTAssertEqual(verdict(19), .release(.batteryFloor))
+        XCTAssertEqual(verdict(floor - 5), .release(.batteryFloor))
     }
 
     /// The load-bearing assertion. One point above the floor is *not* `.proceed`, so a
     /// lock cleared only on `.proceed` cannot re-arm at 21% and drop again at 19%.
     func testJustAboveTheFloorDoesNotReadAsRecovered() {
-        for percent in 20...29 {
+        for percent in floor...(floor + 9) {
             XCTAssertNotEqual(
                 verdict(percent), .proceed,
                 "\(percent)% is inside the warn band; treating it as recovered re-creates the flap")
@@ -42,14 +51,14 @@ final class SafetyHysteresisTest: XCTestCase {
     /// Ten points of clearance is what the governor's warn band already gives us, and
     /// it is where the lock is allowed to lift.
     func testWellClearOfTheFloorRecovers() {
-        XCTAssertEqual(verdict(30), .proceed)
+        XCTAssertEqual(verdict(floor + 10), .proceed)
         XCTAssertEqual(verdict(80), .proceed)
     }
 
     /// Plugging in is the other recovery path, and it must work at any charge.
     func testMainsPowerRecoversImmediately() {
         XCTAssertEqual(verdict(5, isOnMain: true), .proceed)
-        XCTAssertEqual(verdict(19, isOnMain: true), .proceed)
+        XCTAssertEqual(verdict(floor - 1, isOnMain: true), .proceed)
     }
 
     /// The hard floor is a forced sleep, never a plain release — releasing only drops
@@ -106,7 +115,7 @@ final class SafetyLockTest: XCTestCase {
 
     private func makeRuntime(_ power: Power) -> LidCodeRuntime {
         LidCodeRuntime(
-            setting: .default,                       // soft 20, hard 4
+            setting: .default,                       // soft floor, hard 4
             log: ActivityLog(url: logUrl),
             battery: { power.battery },
             thermal: { power.thermal })
@@ -136,7 +145,7 @@ final class SafetyLockTest: XCTestCase {
         runtime.applyScanForTest(["claude", "npm"])
         XCTAssertTrue(runtime.snapshot.isAwakeHeld, "a healthy battery should hold normally")
 
-        power.battery = BatteryReading(percent: 15, isCharging: false, isOnMain: false)
+        power.battery = BatteryReading(percent: floor - 5, isCharging: false, isOnMain: false)
         runtime.tickForTest()
         XCTAssertFalse(runtime.snapshot.isAwakeHeld, "below the soft floor, the hold must drop")
         XCTAssertEqual(runtime.snapshot.blockedBy, .batteryFloor)
@@ -152,7 +161,7 @@ final class SafetyLockTest: XCTestCase {
     /// Repeated scans must stay refused, not just the first one.
     func testRepeatedScanStayRefused() {
         let power = Power()
-        power.battery = BatteryReading(percent: 15, isCharging: false, isOnMain: false)
+        power.battery = BatteryReading(percent: floor - 5, isCharging: false, isOnMain: false)
         let runtime = makeRuntime(power)
         defer { runtime.shutdown() }
 
@@ -173,7 +182,7 @@ final class SafetyLockTest: XCTestCase {
         defer { runtime.shutdown() }
 
         runtime.applyScanForTest(["claude"])
-        power.battery = BatteryReading(percent: 15, isCharging: false, isOnMain: false)
+        power.battery = BatteryReading(percent: floor - 5, isCharging: false, isOnMain: false)
         runtime.tickForTest()
         XCTAssertNotNil(runtime.snapshot.blockedBy)
 
@@ -185,7 +194,7 @@ final class SafetyLockTest: XCTestCase {
     /// to be able to say "five things want this Mac awake and I am not allowing it".
     func testLeaseIsStillRecordedWhileBlocked() {
         let power = Power()
-        power.battery = BatteryReading(percent: 15, isCharging: false, isOnMain: false)
+        power.battery = BatteryReading(percent: floor - 5, isCharging: false, isOnMain: false)
         let runtime = makeRuntime(power)
         defer { runtime.shutdown() }
 
@@ -198,7 +207,7 @@ final class SafetyLockTest: XCTestCase {
     /// Plugging in recovers, and the next scan is allowed to hold again.
     func testRecoveryOnMainsPowerLiftsTheLock() {
         let power = Power()
-        power.battery = BatteryReading(percent: 15, isCharging: false, isOnMain: false)
+        power.battery = BatteryReading(percent: floor - 5, isCharging: false, isOnMain: false)
         let runtime = makeRuntime(power)
         defer { runtime.shutdown() }
 
@@ -207,7 +216,7 @@ final class SafetyLockTest: XCTestCase {
         runtime.tickForTest()
         XCTAssertNotNil(runtime.snapshot.blockedBy)
 
-        power.battery = BatteryReading(percent: 16, isCharging: true, isOnMain: true)
+        power.battery = BatteryReading(percent: floor - 4, isCharging: true, isOnMain: true)
         runtime.tickForTest()
         XCTAssertNil(runtime.snapshot.blockedBy, "on mains, the floor no longer applies")
 
@@ -218,18 +227,20 @@ final class SafetyLockTest: XCTestCase {
     /// Recovering by charge needs real clearance, not one point over the line.
     func testOnePointAboveTheFloorDoesNotLiftTheLock() {
         let power = Power()
-        power.battery = BatteryReading(percent: 15, isCharging: false, isOnMain: false)
+        power.battery = BatteryReading(percent: floor - 5, isCharging: false, isOnMain: false)
         let runtime = makeRuntime(power)
         defer { runtime.shutdown() }
 
         runtime.applyScanForTest(["claude"])
         runtime.tickForTest()
 
-        power.battery = BatteryReading(percent: 21, isCharging: false, isOnMain: false)
+        power.battery = BatteryReading(percent: floor + 1, isCharging: false, isOnMain: false)
         runtime.tickForTest()
-        XCTAssertEqual(runtime.snapshot.blockedBy, .batteryFloor, "21% is still inside the warn band")
+        XCTAssertEqual(
+            runtime.snapshot.blockedBy, .batteryFloor,
+            "one point above the floor is still inside the warn band")
 
-        power.battery = BatteryReading(percent: 35, isCharging: false, isOnMain: false)
+        power.battery = BatteryReading(percent: floor + 15, isCharging: false, isOnMain: false)
         runtime.tickForTest()
         XCTAssertNil(runtime.snapshot.blockedBy, "well clear of the floor — allowed again")
     }
@@ -238,7 +249,7 @@ final class SafetyLockTest: XCTestCase {
     /// gets the next word, so this costs one cycle rather than looping.
     func testExplicitHoldOverridesTheLockOnce() {
         let power = Power()
-        power.battery = BatteryReading(percent: 15, isCharging: false, isOnMain: false)
+        power.battery = BatteryReading(percent: floor - 5, isCharging: false, isOnMain: false)
         let runtime = makeRuntime(power)
         defer { runtime.shutdown() }
 
@@ -401,7 +412,7 @@ final class GuardTest: XCTestCase {
     private func governor(battery isBatteryGuardOn: Bool = true,
                           thermal isThermalGuardOn: Bool = true,
                           isChargingOnly: Bool = false) -> SafetyGovernor {
-        var setting = Setting.default          // soft 20, hard 4, ceiling critical
+        var setting = Setting.default          // soft floor, hard 4, shipped ceiling
         setting.isBatteryGuardOn = isBatteryGuardOn
         setting.isThermalGuardOn = isThermalGuardOn
         setting.isChargingOnly = isChargingOnly
@@ -422,11 +433,11 @@ final class GuardTest: XCTestCase {
     // MARK: - Battery guard
 
     func testSoftFloorFiresWithTheGuardOn() {
-        XCTAssertEqual(verdict(percent: 15), .release(.batteryFloor))
+        XCTAssertEqual(verdict(percent: floor - 5), .release(.batteryFloor))
     }
 
     func testBatteryGuardOffSkipsTheSoftFloor() {
-        let overridden = verdict(percent: 15, batteryGuard: false)
+        let overridden = verdict(percent: floor - 5, batteryGuard: false)
         XCTAssertFalse(overridden.isStop, "the soft floor is the user's call to waive")
     }
 
@@ -556,7 +567,7 @@ final class GuardTest: XCTestCase {
 final class GuardRuntimeTest: XCTestCase {
     private final class Power: @unchecked Sendable {
         let lock = NSLock()
-        private var _battery = BatteryReading(percent: 15, isCharging: false, isOnMain: false)
+        private var _battery = BatteryReading(percent: floor - 5, isCharging: false, isOnMain: false)
         var battery: BatteryReading {
             get { lock.lock(); defer { lock.unlock() }; return _battery }
             set { lock.lock(); _battery = newValue; lock.unlock() }

@@ -171,6 +171,20 @@ public final class LidCodeRuntime: @unchecked Sendable {
     /// nil means we have not dimmed — the reconcile uses this as the "is-dimmed" flag.
     private var savedBrightness: Float?
 
+    /// How many more times the fast wake-path restore should retry before giving up and
+    /// leaving it to the ordinary five-second reconcile.
+    ///
+    /// Opening the lid makes the built-in panel addressable again, but not instantly:
+    /// `CGGetActiveDisplayList` keeps omitting it for a beat after the wake notification
+    /// fires, and `DisplayBrightness.set` is a no-op while it does. One attempt at the
+    /// moment of waking therefore loses the race often enough to look broken.
+    private var brightnessRetryLeft = 0
+
+    /// The most recent lid reading, so a single tick asks `ioreg` once rather than twice.
+    /// `makeSnapshot` used to run its own `read()`, which — with a cache TTL equal to the
+    /// tick interval — meant a second subprocess on most passes.
+    private var lastLid: ClamshellReading?
+
     /// Rate-limits the on-direction clamshell reconcile when the helper is unavailable.
     /// After each failed attempt the retry is deferred by 60s. The off-direction is
     /// never rate-limited — failing to turn disablesleep off must always be acted on.
@@ -456,6 +470,27 @@ public final class LidCodeRuntime: @unchecked Sendable {
         // enable (the old order) produced two "clamshellOn" log lines and two
         // round-trips to the helper for a single user action.
         beginHoldLocked(second: second, mode: mode)
+
+        // The hold has to exist before the toggle is worth setting, and this check is the
+        // difference between a failure you can see and one you cannot.
+        //
+        // `beginHoldLocked` gives up silently when `IOPMAssertionCreateWithName` refuses.
+        // The old code carried on regardless: it set `isClamshellArmed`, set
+        // `disablesleep` to 1, and reported success — so the button said "ON · lid can
+        // close". Then the very next tick evaluated the reconcile invariant
+        // (`armed && held && !locked`), found `held` false, and turned `disablesleep`
+        // straight back off. Five seconds after being told it was protected, the Mac was
+        // not, with nothing on screen saying so. That is exactly the "it says it's keeping
+        // awake but closing the lid still sleeps it" report.
+        guard isHeld else {
+            isClamshellArmed = false
+            persistLocked()
+            log.append(LogEntry(
+                kind: .note, detail: "closed-lid refused: no power assertion could be created"))
+            publish()
+            throw LidCodeError.holdFailed
+        }
+
         isClamshellArmed = true
         persistLocked()
         // Apply disablesleep immediately — regardless of whether the lid is open or
@@ -991,6 +1026,19 @@ public final class LidCodeRuntime: @unchecked Sendable {
         }
         restoreBrightnessLocked()
         if isClamshellActive { setClamshellLocked(false) }
+
+        // Cleared before the `guard`, not after it.
+        //
+        // A stop that arrives with nothing held used to return here leaving `expiresAt`
+        // set, because every line that clears it sits below. A deadline with no hold
+        // behind it is not harmless: `tick` re-runs the expiry branch against it on every
+        // pass, so an already-expired orphan re-fired `stopLocked(.timerExpired)` every
+        // five seconds — re-arming the 24-hour cooldown each time and, with the lid shut,
+        // asking the helper to sleep the Mac again on every tick.
+        expiresAt = nil
+        setting.activeHoldExpiresAt = nil
+        persistLocked()
+
         // Stopping something that was not running still set `isUserPaused` above, and
         // that is the whole point of the flag — so it has to reach the mirror.
         guard isHeld else { publish(); return }
@@ -999,8 +1047,8 @@ public final class LidCodeRuntime: @unchecked Sendable {
         isHeld = false
         let heldSecond = startedAt.map { Int(Date().timeIntervalSince($0)) } ?? 0
         startedAt = nil
-        expiresAt = nil
         lastStopReason = reason
+        // `expiresAt` and the persisted copy of it were already cleared above the guard.
 
         // BUG 1 FIX: After a timer expiry, prevent re-arming until the user explicitly
         // enables again, or until all sessions finish and a brand-new one starts.
@@ -1009,10 +1057,6 @@ public final class LidCodeRuntime: @unchecked Sendable {
             // genuine new session starting after all were finished.
             cooldownUntil = Date().addingTimeInterval(24 * 3600)  // effectively permanent until cleared
         }
-
-        // Clear the persisted expiry — the hold is done.
-        setting.activeHoldExpiresAt = nil
-        persistLocked()
 
         registry.releaseAll()
 
@@ -1028,6 +1072,29 @@ public final class LidCodeRuntime: @unchecked Sendable {
 
     private func setClamshellLockedThrowing(_ isOn: Bool) throws {
         try helper.setClamshell(isOn: isOn)
+
+        // Trust the helper, then check — but only in the on-direction.
+        //
+        // Everything upstream of this line is a report *about* `disablesleep`: the helper
+        // says its `pmset` call exited zero, and we believed it. Turning the toggle *on*
+        // is the direction with no backstop behind it, the direction whose failure is
+        // completely silent, and the direction the user is relying on when they shut the
+        // lid and walk away. So it is verified against the system rather than against our
+        // own optimism. `pmset -g` omits the row entirely when the value is 0, so an
+        // absent row is a real answer — see `PmsetReader.isDisableSleepOn`.
+        //
+        // The off-direction is deliberately not verified. It already has four independent
+        // paths back to normal sleep (the helper's deadman switch, its socket-close
+        // handler, its signal handlers and its launch reconcile), a false negative here
+        // would drop a working helper connection for no reason, and this path runs inside
+        // `shutdown()`, which races a three-second hard exit.
+        if isOn, !isDisableSleepConfirmedOn() {
+            log.append(LogEntry(
+                kind: .safetyWarned,
+                detail: "helper reported disablesleep 1 but pmset still says the Mac will sleep"))
+            throw LidCodeError.clamshellNotApplied
+        }
+
         isClamshellActive = isOn
         // A successful toggle clears the retry back-off and the dedup flag so the next
         // failure (if any) is reported fresh rather than silently swallowed.
@@ -1035,6 +1102,21 @@ public final class LidCodeRuntime: @unchecked Sendable {
         hasWarnedClamshellFailure = false
         log.append(LogEntry(kind: isOn ? .clamshellOn : .clamshellOff, detail: "disablesleep \(isOn ? 1 : 0)"))
         publish()
+    }
+
+    /// Whether `pmset` agrees that sleep is disabled, allowing a moment for it to settle.
+    ///
+    /// `pmset -a disablesleep 1` returns as soon as the write is accepted, which is not
+    /// quite the same instant `pmset -g` reads it back. A single check therefore has a
+    /// small false-negative window, and a false negative here is expensive: it disarms
+    /// closed-lid mode and shows the user an error for a toggle that actually worked.
+    /// Two extra looks, 150 ms apart, close it without turning this into a real delay.
+    private func isDisableSleepConfirmedOn() -> Bool {
+        for attempt in 0..<3 {
+            if PmsetReader.isDisableSleepOn() { return true }
+            if attempt < 2 { Thread.sleep(forTimeInterval: 0.15) }
+        }
+        return false
     }
 
     private func setClamshellLocked(_ isOn: Bool) {
@@ -1110,6 +1192,17 @@ public final class LidCodeRuntime: @unchecked Sendable {
                     kind: .note,
                     detail: "wake recovery: re-connected helper socket"))
             }
+
+            // A wake is the strongest signal we get that the display is usable again, so
+            // the brightness goes back before anything else — including before the tick
+            // below, whose reconcile is gated on a lid reading that has not refreshed yet.
+            if self.savedBrightness != nil {
+                self.brightnessRetryLeft = 8
+                self.attemptBrightnessRestoreLocked()
+            }
+
+            // The cached lid reading is from before the sleep by definition.
+            ClamshellStateReader.shared.invalidate()
 
             // Force an immediate tick so the panel shows fresh post-wake readings
             // rather than data from before the sleep. The regular 5-second timer will
@@ -1235,10 +1328,39 @@ public final class LidCodeRuntime: @unchecked Sendable {
         let hasNonProcessLease = registry.active.contains { $0.source != .process }
         let hasRealWork = hasActiveSession || hasNonProcessLease
         let inCooldown = cooldownUntil.map { Date() < $0 } ?? false
-        let deadlineOk = expiresAt == nil || Date() < expiresAt!
         let safetyOk = safetyLock == nil
 
         let physicalLid = ClamshellStateReader.shared.read()
+        lastLid = physicalLid
+
+        // ── The session timer, checked first ─────────────────────────────────────
+        //
+        // This used to sit near the bottom of the tick, below `guard isHeld ||
+        // isClamshellActive` and below the governor's `switch`, and both of those are
+        // paths that can return before reaching it:
+        //
+        //   - a hold that had already been released left `expiresAt` set (see
+        //     `stopLocked`), and the guard then returned every tick without ever
+        //     clearing it;
+        //   - a governor `.warn` fell through, but `.release` and `.forceSleep` both
+        //     `return`, so on any tick where a guard also fired the deadline was simply
+        //     not looked at.
+        //
+        // A timer is the one promise in this app with a wall clock attached to it. It is
+        // checked before anything that can decline to run, and it is checked against
+        // `expiresAt` alone so no other piece of state can suppress it.
+        if let deadline = expiresAt, Date() >= deadline {
+            let wasLidClosed = physicalLid.state == .closed
+            // `stopLocked` releases the assertion, clears disablesleep, puts the
+            // brightness back and clears the deadline — in that order.
+            stopLocked(reason: .timerExpired)
+            if wasLidClosed {
+                log.append(LogEntry(
+                    kind: .note, detail: "pmset sleepnow after timer expiry (lid was closed)"))
+                try? helper.sleepNow(reason: "Session timer expired with lid closed")
+            }
+            return
+        }
 
         // Reconcile disablesleep against the authoritative invariant.
         // The on-direction is rate-limited: a dead helper causes setClamshellLocked to
@@ -1264,20 +1386,9 @@ public final class LidCodeRuntime: @unchecked Sendable {
 
         reconcileBrightnessLocked(lid: physicalLid.state)
 
-        let shouldHold = !isUserPaused && hasRealWork && safetyOk && deadlineOk && !inCooldown
-
-        // Auto-release: if we are currently holding but the predicate is false, stop.
-        if isHeld && !shouldHold {
-            // Already handled by timer/safety paths below — but cover the case where
-            // hasRealWork went false (session finished) without a timer expiry.
-            // Do NOT call stopLocked here for timer expiry; let the explicit check below do it.
-            if !deadlineOk {
-                // Will be handled by the explicit timer check below.
-            } else if !hasRealWork && isHeld && mode == .smart {
-                // Work genuinely finished — let the idle-release window handle it.
-                // (This path already exists below.)
-            }
-        }
+        // The deadline is not a term here: an expired one returned above, so by this
+        // line it is either absent or still in the future.
+        let shouldHold = !isUserPaused && hasRealWork && safetyOk && !inCooldown
 
         // Auto-arm: if we are not holding but the predicate is true, start a hold.
         if !isHeld && shouldHold && isAutoWatchOn && !isUserPaused && safetyOk && !inCooldown {
@@ -1345,16 +1456,8 @@ public final class LidCodeRuntime: @unchecked Sendable {
             lastWarning = nil
         }
 
-        // Timer expiry with lid-closed → sleep the Mac (BUG 1 / plan step 1.7).
-        if let expiresAt, Date() >= expiresAt {
-            let lidNowClosed = ClamshellStateReader.shared.read().state == .closed
-            stopLocked(reason: .timerExpired)
-            if lidNowClosed {
-                log.append(LogEntry(kind: .note, detail: "pmset sleepnow after timer expiry (lid was closed)"))
-                try? helper.sleepNow(reason: "Session timer expired with lid closed")
-            }
-            return
-        }
+        // The timer is checked at the top of the tick now — see the comment there for
+        // why it cannot live down here.
 
         // Smart mode: release once every lease has been gone for the idle window,
         // or once the agentSession has no .running sessions.
@@ -1561,8 +1664,46 @@ public final class LidCodeRuntime: @unchecked Sendable {
             guard let self else { return }
             ClamshellStateReader.shared.invalidate()
             let lid = ClamshellStateReader.shared.read()
+            self.lastLid = lid
             self.reconcileBrightnessLocked(lid: lid.state)
             self.publish()
+        }
+    }
+
+    /// Put the brightness back **now**, without asking the lid where it is.
+    ///
+    /// The ordinary reconcile is gated on `ClamshellStateReader`, and on the way *out* of
+    /// a closed lid that gate is the problem rather than the protection. `ioreg` keeps
+    /// answering `.closed` for a moment after the screens wake, so a reconcile driven off
+    /// it does nothing on the pass that matters and the user sits looking at a black panel
+    /// until a later tick agrees the lid is open. Meanwhile the screens waking is already
+    /// an unambiguous statement that the display is usable again.
+    ///
+    /// So this path skips the lid entirely. It is safe to do that in this direction and
+    /// only this direction: restoring brightness on a still-closed lid costs nothing (the
+    /// panel is not being looked at, and the next tick re-dims it), whereas failing to
+    /// restore on an open one is the whole complaint.
+    ///
+    /// Retries because `DisplayBrightness.set` fails silently while the built-in panel is
+    /// still missing from the active display list, which it is for a beat after waking.
+    /// Each attempt is scheduled on the runtime queue, so this never blocks the caller.
+    public func restoreBrightnessNow() {
+        queue.async { [weak self] in
+            guard let self, self.savedBrightness != nil else { return }
+            self.brightnessRetryLeft = 8       // ~4s of attempts at 500ms apart
+            self.attemptBrightnessRestoreLocked()
+        }
+    }
+
+    private func attemptBrightnessRestoreLocked() {
+        guard savedBrightness != nil else { brightnessRetryLeft = 0; return }
+        restoreBrightnessLocked()
+        // `restoreBrightnessLocked` clears `savedBrightness` only when the write landed,
+        // so a still-set value means the display was not addressable yet.
+        guard savedBrightness != nil, brightnessRetryLeft > 0 else { return }
+        brightnessRetryLeft -= 1
+        queue.asyncAfter(deadline: .now() + .milliseconds(500)) { [weak self] in
+            self?.attemptBrightnessRestoreLocked()
         }
     }
 
@@ -1617,7 +1758,7 @@ public final class LidCodeRuntime: @unchecked Sendable {
             // queue could only ever say "not stalled", because a stalled queue is by
             // definition not running this line.
             isStalled: false,
-            physicalLid: ClamshellStateReader.shared.read(),
+            physicalLid: lastLid ?? ClamshellStateReader.shared.read(),
             foreignBlockerCount: cachedForeignBlockerCount,
             isGuardOverrideOn: isGuardOverrideOn,
             isClamshellArmed: isClamshellArmed
@@ -1661,6 +1802,10 @@ private final class ReportBox: @unchecked Sendable {
 public enum LidCodeError: LocalizedError {
     case helperMissing
     case appNotRunning
+    /// The hold itself could not start, so there is nothing for closed-lid mode to protect.
+    case holdFailed
+    /// The helper reported success but `pmset -g` disagrees.
+    case clamshellNotApplied
 
     public var errorDescription: String? {
         switch self {
@@ -1668,6 +1813,10 @@ public enum LidCodeError: LocalizedError {
             return "The LidCode helper is not installed. Run Script/install-helper.sh first."
         case .appNotRunning:
             return "LidCode is not running. Open LidCode.app, or use `lidcode -- <command>`."
+        case .holdFailed:
+            return "Could not keep the Mac awake — macOS refused the power assertion. Try again, or restart LidCode."
+        case .clamshellNotApplied:
+            return "The helper reported success but the Mac still sleeps on lid close. Reinstall the helper."
         }
     }
 }

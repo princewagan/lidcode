@@ -80,6 +80,23 @@ public struct Setting: Codable, Sendable, Equatable {
     /// protection is armed. Restored to the previous level when the lid opens.
     public var isDimOnLidCloseOn: Bool
 
+    /// Which generation of defaults this file was written against.
+    ///
+    /// Every other field here is read with `decodeIfPresent` so a *new* setting picks up
+    /// its default without disturbing anything the user tuned. That rule is right, and it
+    /// has one gap: it cannot change a default that is already on disk. When a shipped
+    /// default turns out to be wrong rather than merely different — the thermal ceiling
+    /// at `.critical`, which made the heat guard unreachable — leaving it alone means
+    /// every existing install keeps the broken value forever.
+    ///
+    /// So a version number, bumped only when a default must be corrected in place, and a
+    /// migration in `load()` that runs once. See `migrated()`.
+    public var settingVersion: Int
+
+    /// Bump this, and add a case to `migrated()`, when a shipped default has to change
+    /// for people who already have a settings file.
+    public static let currentVersion = 2
+
     public static let softBatteryRange = 15...50
     public static let hardBatteryRange = 4...8
     /// Changed from 8h to 6h so the slider's intervals are better spaced (J6).
@@ -105,9 +122,22 @@ public struct Setting: Codable, Sendable, Equatable {
     public static let thermalCeilingChoice: [ThermalLevel] = [.fair, .serious, .critical]
 
     public static let `default` = Setting(
-        softBatteryPercent: 20,
+        // 15%, the bottom of `softBatteryRange`. Higher floors end overnight runs that
+        // would have finished, and the hard floor at 4% is the one that exists to protect
+        // the work — this one only decides how much headroom is left on top of it.
+        softBatteryPercent: 15,
         hardBatteryPercent: 4,
-        thermalCeiling: .critical,
+        // `.serious`, not `.critical`.
+        //
+        // A ceiling of `.critical` combined with the fifteen-minute sustained rule made
+        // the heat guard unreachable in practice: macOS reports `critical` thermal
+        // pressure only when it is already throttling hard, and almost never holds it
+        // there for a quarter of an hour. So the toggle said "Stop when hot" and, on a
+        // machine that was genuinely hot for an hour, did nothing — which is the worst
+        // possible state for a safety control, because it reads as protection.
+        // `.serious` sustained for fifteen minutes is a real condition with a real stop
+        // behind it, and a brief all-core burst still cannot trip it.
+        thermalCeiling: .serious,
         idleReleaseSecond: 600,
         isChargingOnly: false,
         // Only task-shaped processes — things that start, do work, and exit.
@@ -141,7 +171,8 @@ public struct Setting: Codable, Sendable, Equatable {
         menuBarShowTempWarnIcon: true,
         menuBarShowAlertIcon: true,
         isClamshellArmed: false,
-        isDimOnLidCloseOn: true
+        isDimOnLidCloseOn: true,
+        settingVersion: currentVersion
     )
 
     /// Every parameter added after `isNetworkProbeOn` has a default, so the existing
@@ -166,7 +197,8 @@ public struct Setting: Codable, Sendable, Equatable {
         menuBarShowTempWarnIcon: Bool = true,
         menuBarShowAlertIcon: Bool = true,
         isClamshellArmed: Bool = false,
-        isDimOnLidCloseOn: Bool = true
+        isDimOnLidCloseOn: Bool = true,
+        settingVersion: Int = Setting.currentVersion
     ) {
         self.softBatteryPercent = softBatteryPercent
         self.hardBatteryPercent = hardBatteryPercent
@@ -188,6 +220,7 @@ public struct Setting: Codable, Sendable, Equatable {
         self.menuBarShowAlertIcon = menuBarShowAlertIcon
         self.isClamshellArmed = isClamshellArmed
         self.isDimOnLidCloseOn = isDimOnLidCloseOn
+        self.settingVersion = settingVersion
     }
 
     /// Decoded field by field with a fallback per key.
@@ -238,6 +271,26 @@ public struct Setting: Codable, Sendable, Equatable {
             ?? fallback.isClamshellArmed
         isDimOnLidCloseOn = try container.decodeIfPresent(Bool.self, forKey: .isDimOnLidCloseOn)
             ?? fallback.isDimOnLidCloseOn
+        // Absent means version 1 — the format before the field existed. Not `currentVersion`:
+        // defaulting an unversioned file to "already current" would skip every migration.
+        settingVersion = try container.decodeIfPresent(Int.self, forKey: .settingVersion) ?? 1
+    }
+
+    /// Bring an older settings file up to the current generation of defaults.
+    ///
+    /// Applied once, in `load()`, before `normalized()`. Each step is deliberately narrow:
+    /// it corrects the specific value that shipped wrong and touches nothing else, so a
+    /// user who tuned a threshold keeps it.
+    func migrated() -> Setting {
+        var copy = self
+        if copy.settingVersion < 2 {
+            // v1 shipped `thermalCeiling = .critical`, which the fifteen-minute sustained
+            // rule made effectively unreachable — the heat guard could not fire. Only the
+            // old default is moved; anyone who had picked `.fair` deliberately keeps it.
+            if copy.thermalCeiling == .critical { copy.thermalCeiling = .serious }
+        }
+        copy.settingVersion = Setting.currentVersion
+        return copy
     }
 
     /// Clamp anything a hand-edited config file could get wrong. A soft floor below
@@ -260,6 +313,8 @@ public struct Setting: Codable, Sendable, Equatable {
         // multiple of the step — the slider and a hand-edited file agree on the grid.
         // Clamp to 6h max (J6): any persisted value above 6h is brought down.
         copy.holdSecond = Self.snappedHold(holdSecond)
+        // Anything that has been through here is, by definition, in the current shape.
+        copy.settingVersion = Setting.currentVersion
         return copy
     }
 
@@ -282,7 +337,9 @@ extension Setting {
         guard let data = try? Data(contentsOf: storeUrl),
               let decoded = try? JSONDecoder().decode(Setting.self, from: data)
         else { return .default }
-        return decoded.normalized()
+        // Migrate before normalising: `normalized()` stamps the current version, so
+        // running it first would erase the evidence that a migration was owed.
+        return decoded.migrated().normalized()
     }
 
     public func save() throws {
