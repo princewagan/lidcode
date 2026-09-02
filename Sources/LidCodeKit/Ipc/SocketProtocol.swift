@@ -58,6 +58,10 @@ public struct SettingPatch: Codable, Sendable {
     public var menuBarShowTempWarnIcon: Bool?
     public var menuBarShowAlertIcon: Bool?
     public var isDimOnLidCloseOn: Bool?
+    public var isMemoryWarningOn: Bool?
+    public var memoryWarnSwapPercent: Int?
+    public var memoryCriticalSwapPercent: Int?
+    public var memoryAppRowCount: Int?
 
     public init(
         softBatteryPercent: Int? = nil,
@@ -76,7 +80,11 @@ public struct SettingPatch: Codable, Sendable {
         menuBarShowErrorBadge: Bool? = nil,
         menuBarShowTempWarnIcon: Bool? = nil,
         menuBarShowAlertIcon: Bool? = nil,
-        isDimOnLidCloseOn: Bool? = nil
+        isDimOnLidCloseOn: Bool? = nil,
+        isMemoryWarningOn: Bool? = nil,
+        memoryWarnSwapPercent: Int? = nil,
+        memoryCriticalSwapPercent: Int? = nil,
+        memoryAppRowCount: Int? = nil
     ) {
         self.softBatteryPercent = softBatteryPercent
         self.hardBatteryPercent = hardBatteryPercent
@@ -95,6 +103,10 @@ public struct SettingPatch: Codable, Sendable {
         self.menuBarShowTempWarnIcon = menuBarShowTempWarnIcon
         self.menuBarShowAlertIcon = menuBarShowAlertIcon
         self.isDimOnLidCloseOn = isDimOnLidCloseOn
+        self.isMemoryWarningOn = isMemoryWarningOn
+        self.memoryWarnSwapPercent = memoryWarnSwapPercent
+        self.memoryCriticalSwapPercent = memoryCriticalSwapPercent
+        self.memoryAppRowCount = memoryAppRowCount
     }
 
     public var isEmpty: Bool {
@@ -106,6 +118,8 @@ public struct SettingPatch: Codable, Sendable {
             && menuBarShowBlockedBadge == nil && menuBarShowErrorBadge == nil
             && menuBarShowTempWarnIcon == nil && menuBarShowAlertIcon == nil
             && isDimOnLidCloseOn == nil
+            && isMemoryWarningOn == nil && memoryWarnSwapPercent == nil
+            && memoryCriticalSwapPercent == nil && memoryAppRowCount == nil
     }
 
     public func applied(to setting: Setting) -> Setting {
@@ -127,6 +141,10 @@ public struct SettingPatch: Codable, Sendable {
         if let menuBarShowTempWarnIcon { copy.menuBarShowTempWarnIcon = menuBarShowTempWarnIcon }
         if let menuBarShowAlertIcon { copy.menuBarShowAlertIcon = menuBarShowAlertIcon }
         if let isDimOnLidCloseOn { copy.isDimOnLidCloseOn = isDimOnLidCloseOn }
+        if let isMemoryWarningOn { copy.isMemoryWarningOn = isMemoryWarningOn }
+        if let memoryWarnSwapPercent { copy.memoryWarnSwapPercent = memoryWarnSwapPercent }
+        if let memoryCriticalSwapPercent { copy.memoryCriticalSwapPercent = memoryCriticalSwapPercent }
+        if let memoryAppRowCount { copy.memoryAppRowCount = memoryAppRowCount }
         return copy.normalized()
     }
 }

@@ -142,6 +142,10 @@ public final class LidCodeRuntime: @unchecked Sendable {
     private var agentSession: AgentSessionSnapshot = .empty
     private var usage: ClaudeUsage?
 
+    /// Most recent memory reading. nil until the first tick, or when shell commands time out.
+    /// Refreshed once per tick alongside other readers; carried in the snapshot for the UI.
+    private var memoryReading: MemoryReading?
+
     // MARK: - New ivars (W1)
 
     /// After a `.timerExpired` stop, nothing auto-re-arms until this clears.
@@ -859,7 +863,8 @@ public final class LidCodeRuntime: @unchecked Sendable {
             activeLease: registry.active.map(\.label),
             battery: battery,
             thermal: thermal,
-            setting: setting
+            setting: setting,
+            memory: memoryReading
         )
 
         let probe = self.probe
@@ -1269,6 +1274,7 @@ public final class LidCodeRuntime: @unchecked Sendable {
         agentSession = newAgentSession
 
         usage = ClaudeUsageReader.read()
+        memoryReading = MemoryReader.read()
 
         // The sustained-heat clock. Started on the first tick at or above the ceiling
         // and cleared the moment the machine drops below it, so cooling down resets the
@@ -1761,7 +1767,8 @@ public final class LidCodeRuntime: @unchecked Sendable {
             physicalLid: lastLid ?? ClamshellStateReader.shared.read(),
             foreignBlockerCount: cachedForeignBlockerCount,
             isGuardOverrideOn: isGuardOverrideOn,
-            isClamshellArmed: isClamshellArmed
+            isClamshellArmed: isClamshellArmed,
+            memory: memoryReading
         )
     }
 

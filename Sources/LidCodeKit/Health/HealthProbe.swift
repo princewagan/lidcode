@@ -14,6 +14,8 @@ public struct HealthContext: Sendable {
     public var battery: BatteryReading
     public var thermal: ThermalReading
     public var setting: Setting
+    /// The most recent memory reading from `MemoryReader`. nil until available.
+    public var memory: MemoryReading?
 
     public init(
         isAwakeHeld: Bool = false,
@@ -25,7 +27,8 @@ public struct HealthContext: Sendable {
         activeLease: [String] = [],
         battery: BatteryReading = .unknown,
         thermal: ThermalReading = .init(level: .nominal),
-        setting: Setting = .default
+        setting: Setting = .default,
+        memory: MemoryReading? = nil
     ) {
         self.isAwakeHeld = isAwakeHeld
         self.isAssertionActive = isAssertionActive
@@ -37,6 +40,7 @@ public struct HealthContext: Sendable {
         self.battery = battery
         self.thermal = thermal
         self.setting = setting
+        self.memory = memory
     }
 }
 
@@ -253,6 +257,32 @@ public actor HealthProbe {
             check.append(HealthCheck(
                 id: "device.disk", group: .device, label: "Disk",
                 state: state, detail: String(format: "%.1f GB free", gigabyte)))
+        }
+
+        // Memory pressure — uses the effective level which is max(kernelPressure, swapDerived).
+        if !setting.isMemoryWarningOn {
+            check.append(HealthCheck(
+                id: "device.memory", group: .device, label: "Memory",
+                state: .off, detail: "memory monitoring off"))
+        } else if let mem = context.memory {
+            let effective = mem.displayLevel(
+                warnSwapPercent: setting.memoryWarnSwapPercent,
+                criticalSwapPercent: setting.memoryCriticalSwapPercent)
+            let state: HealthState
+            switch effective {
+            case .critical: state = .down
+            case .warn:     state = .degraded
+            case .normal:   state = .ok
+            }
+            let detail = String(format: "swap %.0f/%.0f MB (%.0f%%)",
+                mem.swapUsedMegabyte, mem.swapTotalMegabyte, mem.usedPercent)
+            check.append(HealthCheck(
+                id: "device.memory", group: .device, label: "Memory",
+                state: state, detail: detail))
+        } else {
+            check.append(HealthCheck(
+                id: "device.memory", group: .device, label: "Memory",
+                state: .unknown, detail: "reading unavailable"))
         }
 
         return check

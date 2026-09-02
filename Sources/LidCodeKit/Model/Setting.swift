@@ -22,6 +22,27 @@ public struct Setting: Codable, Sendable, Equatable {
     /// completely silent on the wire; the local half of the panel still works.
     public var isNetworkProbeOn: Bool
 
+    // ── Memory monitoring ──────────────────────────────────────────────────────
+    // Added with full `decodeIfPresent` recipe so existing settings files load
+    // cleanly with the shipped defaults.
+
+    /// Whether the `device.memory` health check is active.
+    public var isMemoryWarningOn: Bool
+    /// Swap-used percentage at which the memory level escalates to `.warn`.
+    ///
+    /// Range: 10...95. Must be strictly less than `memoryCriticalSwapPercent` —
+    /// `normalized()` enforces this.
+    public var memoryWarnSwapPercent: Int
+    /// Swap-used percentage at which the memory level escalates to `.critical`.
+    ///
+    /// Range: 20...99. `normalized()` keeps this strictly greater than
+    /// `memoryWarnSwapPercent`.
+    public var memoryCriticalSwapPercent: Int
+    /// How many rows of top memory consumers to include in a `MemoryReading`.
+    ///
+    /// Range: 3...10.
+    public var memoryAppRowCount: Int
+
     /// Whether the **soft** battery floor is enforced. Off is the "Override battery
     /// health" state: the run keeps going below `softBatteryPercent`.
     ///
@@ -96,6 +117,10 @@ public struct Setting: Codable, Sendable, Equatable {
     /// Bump this, and add a case to `migrated()`, when a shipped default has to change
     /// for people who already have a settings file.
     public static let currentVersion = 2
+
+    public static let memoryWarnSwapRange    = 10...95
+    public static let memoryCriticalSwapRange = 20...99
+    public static let memoryAppRowRange       = 3...10
 
     public static let softBatteryRange = 15...50
     public static let hardBatteryRange = 4...8
@@ -172,7 +197,11 @@ public struct Setting: Codable, Sendable, Equatable {
         menuBarShowAlertIcon: true,
         isClamshellArmed: false,
         isDimOnLidCloseOn: true,
-        settingVersion: currentVersion
+        settingVersion: currentVersion,
+        isMemoryWarningOn: true,
+        memoryWarnSwapPercent: 50,
+        memoryCriticalSwapPercent: 85,
+        memoryAppRowCount: 5
     )
 
     /// Every parameter added after `isNetworkProbeOn` has a default, so the existing
@@ -198,7 +227,11 @@ public struct Setting: Codable, Sendable, Equatable {
         menuBarShowAlertIcon: Bool = true,
         isClamshellArmed: Bool = false,
         isDimOnLidCloseOn: Bool = true,
-        settingVersion: Int = Setting.currentVersion
+        settingVersion: Int = Setting.currentVersion,
+        isMemoryWarningOn: Bool = true,
+        memoryWarnSwapPercent: Int = 50,
+        memoryCriticalSwapPercent: Int = 85,
+        memoryAppRowCount: Int = 5
     ) {
         self.softBatteryPercent = softBatteryPercent
         self.hardBatteryPercent = hardBatteryPercent
@@ -221,6 +254,10 @@ public struct Setting: Codable, Sendable, Equatable {
         self.isClamshellArmed = isClamshellArmed
         self.isDimOnLidCloseOn = isDimOnLidCloseOn
         self.settingVersion = settingVersion
+        self.isMemoryWarningOn = isMemoryWarningOn
+        self.memoryWarnSwapPercent = memoryWarnSwapPercent
+        self.memoryCriticalSwapPercent = memoryCriticalSwapPercent
+        self.memoryAppRowCount = memoryAppRowCount
     }
 
     /// Decoded field by field with a fallback per key.
@@ -274,6 +311,14 @@ public struct Setting: Codable, Sendable, Equatable {
         // Absent means version 1 — the format before the field existed. Not `currentVersion`:
         // defaulting an unversioned file to "already current" would skip every migration.
         settingVersion = try container.decodeIfPresent(Int.self, forKey: .settingVersion) ?? 1
+        isMemoryWarningOn = try container.decodeIfPresent(Bool.self, forKey: .isMemoryWarningOn)
+            ?? fallback.isMemoryWarningOn
+        memoryWarnSwapPercent = try container.decodeIfPresent(Int.self, forKey: .memoryWarnSwapPercent)
+            ?? fallback.memoryWarnSwapPercent
+        memoryCriticalSwapPercent = try container.decodeIfPresent(Int.self, forKey: .memoryCriticalSwapPercent)
+            ?? fallback.memoryCriticalSwapPercent
+        memoryAppRowCount = try container.decodeIfPresent(Int.self, forKey: .memoryAppRowCount)
+            ?? fallback.memoryAppRowCount
     }
 
     /// Bring an older settings file up to the current generation of defaults.
@@ -313,6 +358,17 @@ public struct Setting: Codable, Sendable, Equatable {
         // multiple of the step — the slider and a hand-edited file agree on the grid.
         // Clamp to 6h max (J6): any persisted value above 6h is brought down.
         copy.holdSecond = Self.snappedHold(holdSecond)
+        // Memory monitoring: clamp each threshold to its range, then ensure
+        // critical is strictly greater than warn (same pattern as soft/hard battery).
+        copy.memoryWarnSwapPercent = memoryWarnSwapPercent.clamped(to: Setting.memoryWarnSwapRange)
+        copy.memoryCriticalSwapPercent = memoryCriticalSwapPercent.clamped(to: Setting.memoryCriticalSwapRange)
+        if copy.memoryCriticalSwapPercent <= copy.memoryWarnSwapPercent {
+            // Push critical one point above warn (within the allowed range).
+            copy.memoryCriticalSwapPercent = min(
+                copy.memoryWarnSwapPercent + 1,
+                Setting.memoryCriticalSwapRange.upperBound)
+        }
+        copy.memoryAppRowCount = memoryAppRowCount.clamped(to: Setting.memoryAppRowRange)
         // Anything that has been through here is, by definition, in the current shape.
         copy.settingVersion = Setting.currentVersion
         return copy

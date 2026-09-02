@@ -1,9 +1,9 @@
 import SwiftUI
 import LidCodeKit
 
-/// Five things, in this order: what state the Mac is in, the switch that changes it, the
-/// two readings that can end a hold, the two that decide whether starting one is worth
-/// anything, and the settings drawer.
+/// Six things, in this order: what state the Mac is in, the switch that changes it, the
+/// two readings that can end a hold, memory pressure (display-only), the two windows that
+/// decide whether starting a hold is worth anything, and the settings drawer.
 ///
 /// Everything else that used to be here is gone. The panel had grown to eight sections —
 /// activity log, lease list, sparkline, timer bar, agent roster, health report, three
@@ -19,8 +19,12 @@ import LidCodeKit
 /// whether the run is worth starting: an overnight job against a 98%-consumed weekly
 /// window is eight hours of keeping a Mac awake to be told no.
 ///
-/// System metrics that cannot end a hold — CPU load, memory pressure, network throughput
-/// — are still deliberately absent. Activity Monitor already draws them.
+/// Memory pressure is shown as a reading, not a guard. It can indicate that the machine
+/// is under strain during a long run — a useful signal for deciding whether to start or
+/// continue a hold — but LidCode never ends a hold on memory state alone. There is no
+/// reliable, user-configurable threshold at which high memory conclusively means the work
+/// is failing rather than the work being intensive. The section is hidden entirely when
+/// `isMemoryWarningOn` is false or when no reading is available.
 struct MenuView: View {
     @ObservedObject var model: AppModel
 
@@ -33,6 +37,7 @@ struct MenuView: View {
             control
             warningRow        // G1-G3: hardware-state driven warnings
             meterSection
+            memorySection
             usageSection
             // Duration slider moved here from settings drawer (J5).
             sliderSection
@@ -328,6 +333,89 @@ struct MenuView: View {
         .help(celsius == nil
               ? "No die sensor readable. Showing the coarse level macOS reports: \(thermal.level.display.lowercased())"
               : "Hottest CPU die sensor · \(thermal.level.display.lowercased())")
+    }
+
+    // MARK: - Memory
+
+    /// Memory pressure section — display-only, never ends a hold.
+    ///
+    /// Hidden when `isMemoryWarningOn` is false or when no reading is available. The
+    /// per-process rows sum RSS (resident set size), which counts shared frameworks once
+    /// per process that maps them, so the total across rows overcounts physical usage.
+    /// This matches what Activity Monitor shows and is what users recognise, but it is
+    /// not a unique-memory figure. The tooltip on the section label says so.
+    @ViewBuilder
+    private var memorySection: some View {
+        if setting.isMemoryWarningOn, let mem = snapshot.memory {
+            let level = mem.displayLevel(
+                warnSwapPercent: setting.memoryWarnSwapPercent,
+                criticalSwapPercent: setting.memoryCriticalSwapPercent)
+            let swapPct = mem.swapTotalMegabyte > 0
+                ? Int((mem.swapUsedMegabyte / mem.swapTotalMegabyte * 100).rounded())
+                : 0
+
+            let trailingLabel = "\(Int(mem.usedPercent.rounded()))% · swap \(swapPct)%"
+
+            VStack(alignment: .leading, spacing: 6) {
+                SectionLabel(text: "Memory", trailing: trailingLabel)
+                    .help("Memory pressure from the kernel plus swap usage. Per-process figures sum RSS — shared frameworks are counted once per process that maps them, so the totals overcount physical usage. Use these for relative comparison, not exact accounting.")
+
+                // One bar for the overall effective level.
+                BarGauge(
+                    label: "Pressure",
+                    fraction: memoryFraction(level: level),
+                    color: memoryColor(level: level),
+                    value: level.pushLabel.capitalized
+                )
+
+                // Top consumers — name left, size right, no bar.
+                let rows = mem.app.prefix(setting.memoryAppRowCount)
+                ForEach(Array(rows.enumerated()), id: \.offset) { _, app in
+                    HStack {
+                        Text(app.name)
+                            .font(.system(size: 10))
+                            .foregroundStyle(.secondary)
+                            .lineLimit(1)
+                            .truncationMode(.tail)
+                        Spacer(minLength: 4)
+                        Text(memoryAppSize(app.megabyte))
+                            .font(.system(size: 10, weight: .medium).monospacedDigit())
+                            .foregroundStyle(.secondary)
+                    }
+                    .frame(height: 14)
+                }
+            }
+        }
+    }
+
+    /// Map the effective level to a 0...1 fraction for the bar gauge.
+    ///
+    /// Three steps (normal / warn / critical) rendered across a continuous scale:
+    /// normal = 0...0.33, warn = 0.34...0.66, critical = 0.67...1.0. A fixed
+    /// fraction is used rather than a raw kernel integer so the bar stays at a stable
+    /// position within each band regardless of pressure sub-levels the kernel may add.
+    private func memoryFraction(level: MemoryPressureLevel) -> Double {
+        switch level {
+        case .normal:   return 0.15
+        case .warn:     return 0.55
+        case .critical: return 0.90
+        }
+    }
+
+    private func memoryColor(level: MemoryPressureLevel) -> Color {
+        switch level {
+        case .normal:   return Palette.brandSoft
+        case .warn:     return Palette.brand           // orange — informational
+        case .critical: return Palette.brandDeep       // deep red — serious
+        }
+    }
+
+    /// Format a megabyte value as "X.XX GB" when >= 1024, "XXX MB" below.
+    private func memoryAppSize(_ megabyte: Double) -> String {
+        if megabyte >= 1024 {
+            return String(format: "%.2f GB", megabyte / 1024)
+        }
+        return "\(Int(megabyte.rounded())) MB"
     }
 
     // MARK: - Claude usage

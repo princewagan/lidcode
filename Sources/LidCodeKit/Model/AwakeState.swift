@@ -98,6 +98,10 @@ public struct RuntimeSnapshot: Codable, Sendable {
     /// disconnected. Distinct from `isClamshellActive`, which means pmset has agreed.
     public var isClamshellArmed: Bool
 
+    /// The most recent memory reading. nil until the first successful `MemoryReader.read()`
+    /// on the runtime tick, or when both shell commands time out.
+    public var memory: MemoryReading?
+
     public init(
         isAwakeHeld: Bool = false,
         isAssertionActive: Bool = false,
@@ -120,7 +124,8 @@ public struct RuntimeSnapshot: Codable, Sendable {
         physicalLid: ClamshellReading = ClamshellReading(state: .unknown, readAt: Date(), isStale: true),
         foreignBlockerCount: Int = 0,
         isGuardOverrideOn: Bool = false,
-        isClamshellArmed: Bool = false
+        isClamshellArmed: Bool = false,
+        memory: MemoryReading? = nil
     ) {
         self.isAwakeHeld = isAwakeHeld
         self.isAssertionActive = isAssertionActive
@@ -144,6 +149,7 @@ public struct RuntimeSnapshot: Codable, Sendable {
         self.foreignBlockerCount = foreignBlockerCount
         self.isGuardOverrideOn = isGuardOverrideOn
         self.isClamshellArmed = isClamshellArmed
+        self.memory = memory
     }
 
     /// Decoded key by key with a fallback, for the same reason `Setting` is.
@@ -179,6 +185,7 @@ public struct RuntimeSnapshot: Codable, Sendable {
         foreignBlockerCount = try container.decodeIfPresent(Int.self, forKey: .foreignBlockerCount) ?? 0
         isGuardOverrideOn = try container.decodeIfPresent(Bool.self, forKey: .isGuardOverrideOn) ?? false
         isClamshellArmed = try container.decodeIfPresent(Bool.self, forKey: .isClamshellArmed) ?? false
+        memory = try container.decodeIfPresent(MemoryReading.self, forKey: .memory)
     }
 
     public var runtimeSecond: Int {
