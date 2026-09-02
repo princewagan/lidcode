@@ -57,6 +57,19 @@ public struct ClaudeAccountUsage: Codable, Sendable, Equatable {
     /// the same field written by `fetch-usage.py` so Swift never hardcodes any path.
     public var storageDir: String?
 
+    /// When these numbers were actually read from Anthropic.
+    ///
+    /// Distinct from the file's own `fetchedAt`, and the distinction is the point: the
+    /// fetcher now falls back to the last good reading when a poll fails, so the file can
+    /// be a minute old while one account's figures are ten minutes old. Without a
+    /// per-account stamp, carried-forward numbers would be presented as current.
+    public var asOf: Date?
+    /// True when this reading was reused because the latest poll for this account failed.
+    public var isCarried: Bool
+    /// What went wrong on the poll that was carried over — "error" or "expired".
+    /// nil when `isCarried` is false.
+    public var degraded: String?
+
     public init(
         key: String,
         label: String,
@@ -64,7 +77,10 @@ public struct ClaudeAccountUsage: Codable, Sendable, Equatable {
         fiveHour: UsageWindow? = nil,
         sevenDay: UsageWindow? = nil,
         severity: String? = nil,
-        storageDir: String? = nil
+        storageDir: String? = nil,
+        asOf: Date? = nil,
+        isCarried: Bool = false,
+        degraded: String? = nil
     ) {
         self.key = key
         self.label = label
@@ -73,6 +89,35 @@ public struct ClaudeAccountUsage: Codable, Sendable, Equatable {
         self.sevenDay = sevenDay
         self.severity = severity
         self.storageDir = storageDir
+        self.asOf = asOf
+        self.isCarried = isCarried
+        self.degraded = degraded
+    }
+
+    /// Decoded key by key so a snapshot written by an older `lidcode` binary still
+    /// loads — same reason `Setting` and `RuntimeSnapshot` do it.
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        key = try container.decodeIfPresent(String.self, forKey: .key) ?? ""
+        label = try container.decodeIfPresent(String.self, forKey: .label) ?? ""
+        status = try container.decodeIfPresent(String.self, forKey: .status) ?? "error"
+        fiveHour = try container.decodeIfPresent(UsageWindow.self, forKey: .fiveHour)
+        sevenDay = try container.decodeIfPresent(UsageWindow.self, forKey: .sevenDay)
+        severity = try container.decodeIfPresent(String.self, forKey: .severity)
+        storageDir = try container.decodeIfPresent(String.self, forKey: .storageDir)
+        asOf = try container.decodeIfPresent(Date.self, forKey: .asOf)
+        isCarried = try container.decodeIfPresent(Bool.self, forKey: .isCarried) ?? false
+        degraded = try container.decodeIfPresent(String.self, forKey: .degraded)
+    }
+
+    /// How stale these particular numbers are, or nil when they are from this poll.
+    public func carriedAgeDisplay(asOf now: Date = Date()) -> String? {
+        guard isCarried, let asOf else { return nil }
+        let second = Int(now.timeIntervalSince(asOf))
+        guard second > 0 else { return "just now" }
+        if second < 60 { return "\(second)s ago" }
+        if second < 3600 { return "\(second / 60)m ago" }
+        return "\(second / 3600)h ago"
     }
 }
 
@@ -195,6 +240,11 @@ public enum ClaudeUsageReader {
             var storageDir: String?
             var fiveHour: Window?
             var sevenDay: Window?
+            /// When this account's numbers were actually read. Absent in files written
+            /// before the fetcher gained its carry-forward behaviour.
+            var asOf: String?
+            var carried: Bool?
+            var degraded: String?
         }
         var fetchedAt: String?
         var fiveHour: Window?
@@ -225,7 +275,13 @@ public enum ClaudeUsageReader {
                     fiveHour: fh,
                     sevenDay: sd,
                     severity: raw.severity,
-                    storageDir: raw.storageDir)
+                    storageDir: raw.storageDir,
+                    // Falls back to the file's own timestamp so an older file, whose
+                    // accounts carry no per-account stamp, still reports an age rather
+                    // than nothing.
+                    asOf: raw.asOf.flatMap(date(fromIso:)) ?? fetchedAt,
+                    isCarried: raw.carried ?? false,
+                    degraded: raw.degraded)
             }
         } else {
             // Old single-account file: synthesise the default account so callers can
