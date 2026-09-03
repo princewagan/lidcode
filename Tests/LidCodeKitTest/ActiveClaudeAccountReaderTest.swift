@@ -26,7 +26,7 @@ final class EtimeParseTest: XCTestCase {
     }
 
     /// Malformed input should not crash; Int.max is the sentinel that causes the
-    /// caller's min() to skip this row in favour of any valid one.
+    /// caller's sort to treat this row as the oldest so any valid row wins over it.
     func testMalformedEtimeReturnsIntMax() {
         XCTAssertEqual(ActiveClaudeAccountReader.parseEtime(""), Int.max)
         XCTAssertEqual(ActiveClaudeAccountReader.parseEtime("notadate"), Int.max)
@@ -35,56 +35,133 @@ final class EtimeParseTest: XCTestCase {
 }
 
 // ---------------------------------------------------------------------------
-// ps row parsing
+// ps row parsing — 4-column format: pid  etime  pcpu  comm
 // ---------------------------------------------------------------------------
 
 final class ClaudeRowParseTest: XCTestCase {
 
     func testNonClaudeRowIsIgnored() {
-        let row = ActiveClaudeAccountReader.parseClaudeRow(from: "  123  01:30  /usr/bin/python3")
+        let row = ActiveClaudeAccountReader.parseClaudeRow(
+            from: "  123  01:30  0.0  /usr/bin/python3")
         XCTAssertNil(row)
     }
 
     func testClaudeRowByFullPath() {
         let row = ActiveClaudeAccountReader.parseClaudeRow(
-            from: "  456  00:45  /Users/princewagan/.nvm/versions/node/v22.17.0/bin/claude")
+            from: "  456  00:45  12.5  /Users/princewagan/.nvm/versions/node/v22.17.0/bin/claude")
         XCTAssertNotNil(row)
         XCTAssertEqual(row?.pid, 456)
         XCTAssertEqual(row?.elapsedSecond, 45)
+        XCTAssertEqual(row?.cpuPercent, 12.5)
     }
 
     func testClaudeRowBareExecutable() {
-        let row = ActiveClaudeAccountReader.parseClaudeRow(from: "789  1:02:03  claude")
+        let row = ActiveClaudeAccountReader.parseClaudeRow(
+            from: "789  1:02:03  3.2  claude")
         XCTAssertNotNil(row)
         XCTAssertEqual(row?.pid, 789)
         XCTAssertEqual(row?.elapsedSecond, 3723)
+        XCTAssertEqual(row?.cpuPercent, 3.2)
+    }
+
+    func testUnparseableCpuDefaultsToZero() {
+        // A malformed pcpu field must not drop the row — it stores 0 instead.
+        let row = ActiveClaudeAccountReader.parseClaudeRow(
+            from: "  999  00:10  -  claude")
+        XCTAssertNotNil(row)
+        XCTAssertEqual(row?.cpuPercent, 0.0)
     }
 
     func testPartialRowIsIgnored() {
-        // Too few whitespace-separated fields to extract all three components.
-        XCTAssertNil(ActiveClaudeAccountReader.parseClaudeRow(from: "123 01:30"))
+        // Too few whitespace-separated fields to extract all four components.
+        XCTAssertNil(ActiveClaudeAccountReader.parseClaudeRow(from: "123 01:30 0.0"))
         XCTAssertNil(ActiveClaudeAccountReader.parseClaudeRow(from: ""))
     }
 
     /// The "clauded" daemon or "claude-thing" must not match — only the executable
     /// named exactly "claude" qualifies.
     func testNearMatchesAreRejected() {
-        XCTAssertNil(ActiveClaudeAccountReader.parseClaudeRow(from: "100 00:01 /bin/clauded"))
-        XCTAssertNil(ActiveClaudeAccountReader.parseClaudeRow(from: "101 00:01 /bin/claude-helper"))
+        XCTAssertNil(ActiveClaudeAccountReader.parseClaudeRow(from: "100 00:01 0.0 /bin/clauded"))
+        XCTAssertNil(ActiveClaudeAccountReader.parseClaudeRow(from: "101 00:01 0.0 /bin/claude-helper"))
     }
 }
 
 // ---------------------------------------------------------------------------
-// Picking the newest process from a table
+// Picking the active row — busiest wins, ties broken by newer (smaller etime)
+// ---------------------------------------------------------------------------
+
+final class PickActiveRowTest: XCTestCase {
+
+    func testBusiestRowWinsOverNewest() {
+        // pid 1003 is the newest (30s) but pid 1002 is busiest (15.0%).
+        // Busiest must win.
+        let rows = [
+            ClaudeRow(pid: 1001, elapsedSecond: 630, cpuPercent: 1.0),
+            ClaudeRow(pid: 1002, elapsedSecond: 65,  cpuPercent: 15.0),
+            ClaudeRow(pid: 1003, elapsedSecond: 30,  cpuPercent: 0.5),
+        ]
+        let result = ActiveClaudeAccountReader.pickActiveRow(from: rows)
+        XCTAssertEqual(result?.row.pid, 1002)
+        XCTAssertEqual(result?.isBusy, true)
+    }
+
+    func testAllBelowThresholdGivesIsBusyFalse() {
+        // All sessions are idle — none reaches busyCpuPercent (2.0).
+        let rows = [
+            ClaudeRow(pid: 2001, elapsedSecond: 500, cpuPercent: 0.0),
+            ClaudeRow(pid: 2002, elapsedSecond: 100, cpuPercent: 1.5),
+            ClaudeRow(pid: 2003, elapsedSecond: 20,  cpuPercent: 0.8),
+        ]
+        let result = ActiveClaudeAccountReader.pickActiveRow(from: rows)
+        XCTAssertNotNil(result)
+        XCTAssertEqual(result?.isBusy, false)
+        // The highest-cpu row still wins among the idle ones (pid 2002 at 1.5%).
+        XCTAssertEqual(result?.row.pid, 2002)
+    }
+
+    func testTieOnCpuPicksNewer() {
+        // Two rows with identical CPU — the one with smaller elapsedSecond (newer) wins.
+        let rows = [
+            ClaudeRow(pid: 3001, elapsedSecond: 200, cpuPercent: 8.0),
+            ClaudeRow(pid: 3002, elapsedSecond: 50,  cpuPercent: 8.0),
+        ]
+        let result = ActiveClaudeAccountReader.pickActiveRow(from: rows)
+        XCTAssertEqual(result?.row.pid, 3002,
+            "tie on CPU must be broken by newer process (smaller elapsedSecond)")
+        XCTAssertEqual(result?.isBusy, true)
+    }
+
+    func testEmptyTableReturnsNil() {
+        XCTAssertNil(ActiveClaudeAccountReader.pickActiveRow(from: []))
+    }
+
+    func testSingleRowAlwaysWins() {
+        let rows = [ClaudeRow(pid: 4001, elapsedSecond: 300, cpuPercent: 0.1)]
+        let result = ActiveClaudeAccountReader.pickActiveRow(from: rows)
+        XCTAssertEqual(result?.row.pid, 4001)
+        XCTAssertEqual(result?.isBusy, false)  // 0.1 < busyCpuPercent
+    }
+
+    func testExactlyAtThresholdIsBusy() {
+        // A row at exactly busyCpuPercent must be considered busy.
+        let rows = [ClaudeRow(pid: 5001, elapsedSecond: 60,
+                              cpuPercent: ActiveClaudeAccountReader.busyCpuPercent)]
+        let result = ActiveClaudeAccountReader.pickActiveRow(from: rows)
+        XCTAssertEqual(result?.isBusy, true)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Picking the newest process from the full ps table (4-column format)
 // ---------------------------------------------------------------------------
 
 final class NewestClaudeRowTest: XCTestCase {
 
     private let psTable = """
-      1001  10:30  /path/to/claude
-      1002  01:05  /path/to/claude
-      1003  00:30  /path/to/claude
-      1004  05:00  /path/to/node
+      1001  10:30  1.0  /path/to/claude
+      1002  01:05  0.5  /path/to/claude
+      1003  00:30  0.2  /path/to/claude
+      1004  05:00  0.0  /path/to/node
     """
 
     func testSmallestElapsedTimeIsNewest() {
@@ -102,7 +179,8 @@ final class NewestClaudeRowTest: XCTestCase {
     }
 
     func testTableWithOnlyNonClaudeRowsIsEmpty() {
-        let rows = ActiveClaudeAccountReader.parseClaudeRows(from: "  99  00:01  /usr/bin/vim")
+        let rows = ActiveClaudeAccountReader.parseClaudeRows(
+            from: "  99  00:01  0.0  /usr/bin/vim")
         XCTAssertTrue(rows.isEmpty)
     }
 }
