@@ -33,7 +33,7 @@ export const DEMO_QUERY_FLAG = "demo";
 /**
  * Returns the demo variant requested by the URL, or null if not in demo mode.
  *
- *   /?demo=1   → "v2"  (full schema_version 2 fixture)
+ *   /?demo=1   → "v2"  (full schema_version 3 fixture — memory, accounts, status)
  *   /?demo=v1  → "v1"  (schema_version 1 fixture, no memory/claude_accounts)
  *   anything else → null
  */
@@ -197,11 +197,14 @@ export function createDemoState(now: Date = new Date()): LidCodeState {
   const holdRemainingMs = 86 * MINUTE + 30_000;
 
   return {
-    schema_version: 2,
+    schema_version: 3,
     pushed_at: ago(t, 12_000),
     mac_hostname: "prince-mbp",
     awake_held: true,
     physical_lid: "closed",
+    status_kind: "holding",
+    status_title: "Keeping awake · 2 active sessions",
+    status_detail: "Held by claude, codex",
     hold_expires_at: new Date(t + holdRemainingMs).toISOString(),
     hold_elapsed_fraction: 0.42,
     battery_percent: 83,

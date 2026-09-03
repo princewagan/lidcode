@@ -9,8 +9,11 @@
  * Schema versions:
  *   v1 — original fields only
  *   v2 — adds optional `memory` and `claude_accounts` top-level fields
+ *   v3 — adds optional `status_kind` / `status_title` / `status_detail`
  *
- * Both optional fields are .optional() so a Mac still on v1 never gets 400'd.
+ * Every added field is .optional() so a Mac still on v1 or v2 never gets 400'd.
+ * Deploy this file before shipping a Mac build that sends the newer version —
+ * an unknown `schema_version` fails the union and rejects the whole push.
  *
  * Do NOT import or re-export from lib/schema.ts — these are separate contracts.
  */
@@ -71,11 +74,30 @@ export const LidCodeClaudeAccountSchema = z.object({
 export type LidCodeClaudeAccount = z.infer<typeof LidCodeClaudeAccountSchema>;
 
 // ---------------------------------------------------------------------------
+// Status line — optional, schema_version 3+
+//
+// Mirrors RuntimeStatusKind in LidCodeKit. `awake_held` on its own collapses six
+// menu-bar states into two, so a paused or guard-blocked Mac read as plain
+// "asleep" on the phone.
+// ---------------------------------------------------------------------------
+
+export const LidCodeStatusKindSchema = z.enum([
+  "stalled",
+  "blocked",
+  "holding",
+  "waiting",
+  "paused",
+  "idle",
+]);
+
+export type LidCodeStatusKind = z.infer<typeof LidCodeStatusKindSchema>;
+
+// ---------------------------------------------------------------------------
 // LidCodeState — top-level payload, matches what LidCode.app POSTs
 // ---------------------------------------------------------------------------
 
 export const LidCodeStateSchema = z.object({
-  schema_version: z.union([z.literal(1), z.literal(2)]),
+  schema_version: z.union([z.literal(1), z.literal(2), z.literal(3)]),
   pushed_at: z.string().datetime(),
   mac_hostname: z.string(),
   awake_held: z.boolean(),
@@ -93,6 +115,10 @@ export const LidCodeStateSchema = z.object({
   // v2 optional fields — absent on v1 pushes, never required
   memory: LidCodeMemorySchema.optional(),
   claude_accounts: z.array(LidCodeClaudeAccountSchema).optional(),
+  // v3 optional fields — absent on v1/v2 pushes, never required
+  status_kind: LidCodeStatusKindSchema.optional(),
+  status_title: z.string().optional(),
+  status_detail: z.string().optional(),
 });
 
 export type LidCodeState = z.infer<typeof LidCodeStateSchema>;

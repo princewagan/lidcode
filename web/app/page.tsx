@@ -41,6 +41,7 @@ import type {
   LidCodeSession,
   LidCodeMemory,
   LidCodeClaudeAccount,
+  LidCodeStatusKind,
 } from "@/lib/lidcodeSchema";
 import {
   createDemoState,
@@ -466,6 +467,16 @@ function TopRail({
 // Hero — the title card
 // ---------------------------------------------------------------------------
 
+/**
+ * Trouble states get the error dot next to the headline. A Mac that stopped
+ * ticking or is refusing to re-arm looks identical to a healthy idle one if you
+ * only read `awake_held`, and the phone is where you look precisely because you
+ * cannot see the menu bar.
+ */
+function statusIsTrouble(kind: LidCodeStatusKind | undefined): boolean {
+  return kind === "stalled" || kind === "blocked";
+}
+
 function Hero({ state }: { state: LidCodeState }) {
   const now = new Date();
   const running = state.sessions.filter((s) => s.status === "running").length;
@@ -477,13 +488,19 @@ function Hero({ state }: { state: LidCodeState }) {
       ? "Lid open"
       : "Lid unknown";
 
-  const subtitle = state.awake_held
-    ? running > 0
-      ? `Held awake · ${running} session${running === 1 ? "" : "s"}`
-      : "Held awake"
-    : running > 0
-    ? "Sleep not held · sessions running"
-    : "Free to sleep";
+  // v3 sends the exact line the menu bar shows. Older Macs don't, so keep
+  // deriving something reasonable from the fields v1 always had.
+  const subtitle =
+    state.status_title ??
+    (state.awake_held
+      ? running > 0
+        ? `Held awake · ${running} session${running === 1 ? "" : "s"}`
+        : "Held awake"
+      : running > 0
+      ? "Sleep not held · sessions running"
+      : "Free to sleep");
+
+  const trouble = statusIsTrouble(state.status_kind);
 
   return (
     <Band index={0} style={{ paddingTop: 32, paddingBottom: 32 }}>
@@ -507,16 +524,45 @@ function Hero({ state }: { state: LidCodeState }) {
         {state.awake_held ? "AWAKE" : "ASLEEP"}
       </h1>
 
-      <p
+      <div
         style={{
+          display: "flex",
+          alignItems: "center",
+          gap: 8,
           margin: "16px 0 0",
-          fontSize: 14,
-          letterSpacing: "-0.035em",
-          color: "var(--lc-fg-2)",
         }}
       >
-        {subtitle}
-      </p>
+        {trouble && (
+          <span
+            aria-hidden
+            style={{
+              width: 6,
+              height: 6,
+              borderRadius: "50%",
+              background: STATUS_COLORS.error,
+              flexShrink: 0,
+            }}
+          />
+        )}
+        <p
+          style={{
+            margin: 0,
+            fontSize: 14,
+            letterSpacing: "-0.035em",
+            color: trouble ? "var(--lc-fg)" : "var(--lc-fg-2)",
+          }}
+        >
+          {subtitle}
+        </p>
+      </div>
+
+      {/* The sentence behind the headline — "Held by claude, codex", or why a
+          guard is refusing to re-arm. v3 only. */}
+      {state.status_detail && (
+        <p style={{ margin: "8px 0 0" }}>
+          <Micro style={{ color: "var(--lc-fg-3)" }}>{state.status_detail}</Micro>
+        </p>
+      )}
 
       {/* Hold timer — the one 2px line on the page. */}
       {state.hold_expires_at != null && (
