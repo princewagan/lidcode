@@ -100,48 +100,23 @@ struct MenuView: View {
         .help(statusDetail)
     }
 
-    private var statusColor: Color {
-        if snapshot.isStalled || snapshot.blockedBy != nil { return Palette.brandDeep }
-        if snapshot.isAwakeHeld || snapshot.isClamshellActive { return Palette.brand }
-        return Palette.brandSoft
-    }
-
     /// C3: "Keeping awake · N active sessions" (singular when 1)
     /// C4: "Waiting for a session" when mode ON but nothing running
-    private var statusTitle: String {
-        if snapshot.isStalled { return "Not responding" }
-        if snapshot.blockedBy != nil { return "Holding back" }
-        if snapshot.isAwakeHeld || snapshot.isClamshellActive {
-            let n = snapshot.agentSession.activeCount
-            if n > 0 { return "Keeping awake · \(n) active session\(n == 1 ? "" : "s")" }
-            return "Keeping awake"
+    ///
+    /// The wording and the precedence behind it live on `RuntimeSnapshot` so the
+    /// push payload can carry the same line to the phone. Keeping a second copy
+    /// here is what let the dashboard fall behind the menu in the first place.
+    private var statusColor: Color {
+        switch snapshot.displayStatus.kind {
+        case .stalled, .blocked:   return Palette.brandDeep
+        case .holding:             return Palette.brand
+        case .waiting, .paused, .idle: return Palette.brandSoft
         }
-        // C4: auto-watch is on and user hasn't paused — watching, waiting for a session.
-        // model.isEnabled is false here (no hold yet), so check isAutoWatchOn directly.
-        if snapshot.isAutoWatchOn && !snapshot.isUserPaused {
-            return "Waiting for a session"
-        }
-        return snapshot.isUserPaused ? "Paused by you" : "Idle"
     }
 
-    private var statusDetail: String {
-        if snapshot.isStalled { return "The engine stopped ticking. Quit and reopen LidCode" }
-        if let blocked = snapshot.blockedBy {
-            return "\(blocked.summary). Won't re-arm until it recovers"
-        }
-        if snapshot.isUserPaused && !snapshot.isAwakeHeld {
-            return snapshot.activeLease.isEmpty
-                ? "Auto-watch won't turn this back on"
-                : "\(snapshot.activeLease.count) running. Auto-watch won't turn this back on"
-        }
-        if let reason = snapshot.lastStopReason, !snapshot.isAwakeHeld {
-            return "Last stop: \(reason.summary)"
-        }
-        if snapshot.activeLease.isEmpty {
-            return snapshot.mode == .manual ? "Manual hold" : "Releases when work stops"
-        }
-        return "Held by \(snapshot.activeLease.prefix(3).joined(separator: ", "))"
-    }
+    private var statusTitle: String { snapshot.displayStatus.title }
+
+    private var statusDetail: String { snapshot.displayStatus.detail }
 
     /// "2h 14m left" while a timer is running, elapsed time when the hold has no deadline.
     private var remainingDisplay: String {

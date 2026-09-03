@@ -75,7 +75,7 @@ public struct LidCodeClaudeAccountPayload: Codable, Sendable {
 }
 
 public struct LidCodePushPayload: Codable, Sendable {
-    public var schema_version: Int                     // 2 since the memory block landed
+    public var schema_version: Int                     // 3 since the status line landed
     public var pushed_at: String                       // ISO8601 UTC
     public var mac_hostname: String
     public var awake_held: Bool
@@ -93,6 +93,12 @@ public struct LidCodePushPayload: Codable, Sendable {
     // v2 additions. Both omitted when nil so the schema's v1 shape still validates.
     public var memory: LidCodeMemoryPayload?
     public var claude_accounts: [LidCodeClaudeAccountPayload]?
+    // v3 additions. `awake_held` alone collapses six menu-bar states into two, so a
+    // Mac that is paused, guard-blocked, or not responding reads as plain "asleep"
+    // from the phone — the one place you cannot look at the menu to find out.
+    public var status_kind: String?                     // RuntimeStatusKind raw value
+    public var status_title: String?
+    public var status_detail: String?
 
     public init(
         schema_version: Int,
@@ -111,7 +117,10 @@ public struct LidCodePushPayload: Codable, Sendable {
         foreign_blocker_count: Int,
         sessions: [LidCodeSessionPayload],
         memory: LidCodeMemoryPayload? = nil,
-        claude_accounts: [LidCodeClaudeAccountPayload]? = nil
+        claude_accounts: [LidCodeClaudeAccountPayload]? = nil,
+        status_kind: String? = nil,
+        status_title: String? = nil,
+        status_detail: String? = nil
     ) {
         self.schema_version = schema_version
         self.pushed_at = pushed_at
@@ -130,6 +139,9 @@ public struct LidCodePushPayload: Codable, Sendable {
         self.sessions = sessions
         self.memory = memory
         self.claude_accounts = claude_accounts
+        self.status_kind = status_kind
+        self.status_title = status_title
+        self.status_detail = status_detail
     }
 }
 
@@ -492,8 +504,10 @@ public final class LidCodePusher: @unchecked Sendable {
             )
         }
 
+        let status = snapshot.displayStatus
+
         return LidCodePushPayload(
-            schema_version: 2,
+            schema_version: 3,
             pushed_at: iso.string(from: pushedAt),
             mac_hostname: hostName(),
             awake_held: snapshot.isAwakeHeld,
@@ -509,7 +523,10 @@ public final class LidCodePusher: @unchecked Sendable {
             foreign_blocker_count: snapshot.foreignBlockerCount,
             sessions: sessionPayloads,
             memory: memoryPayload,
-            claude_accounts: accountPayloads
+            claude_accounts: accountPayloads,
+            status_kind: status.kind.rawValue,
+            status_title: status.title,
+            status_detail: status.detail
         )
     }
 
@@ -544,6 +561,11 @@ public final class LidCodePusher: @unchecked Sendable {
             // Account statuses only, for the same reason: a login expiring matters,
             // a utilisation tick does not.
             var claude_accounts: [String]?
+            // The status *kind*, never the sentence. Falling into `stalled` or
+            // `blocked` should reach the phone straight away — that is the whole
+            // reason to look at it. The wording underneath moves with the session
+            // count, which `sessions` already covers.
+            var status_kind: String?
         }
 
         let c = Significant(
@@ -556,7 +578,8 @@ public final class LidCodePusher: @unchecked Sendable {
             memory_pressure: payload.memory?.pressure,
             claude_accounts: payload.claude_accounts.map { list in
                 list.map { "\($0.key):\($0.status):\($0.is_active)" }.sorted()
-            }
+            },
+            status_kind: payload.status_kind
         )
 
         let encoder = JSONEncoder()

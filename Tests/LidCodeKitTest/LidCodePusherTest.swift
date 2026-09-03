@@ -224,7 +224,7 @@ final class LidCodePusherTest: XCTestCase {
         let body = try XCTUnwrap(stub.requests.first?.httpBody)
         let json = try XCTUnwrap(JSONSerialization.jsonObject(with: body) as? [String: Any])
 
-        XCTAssertEqual(json["schema_version"] as? Int, 2)
+        XCTAssertEqual(json["schema_version"] as? Int, 3)
 
         let accounts = try XCTUnwrap(json["claude_accounts"] as? [[String: Any]])
         XCTAssertEqual(accounts.count, 2, "both accounts must reach the dashboard")
@@ -299,7 +299,7 @@ final class LidCodePusherTest: XCTestCase {
         let body = try XCTUnwrap(stub.requests.first?.httpBody)
         let json = try XCTUnwrap(JSONSerialization.jsonObject(with: body) as? [String: Any])
 
-        XCTAssertEqual(json["schema_version"] as? Int, 2)
+        XCTAssertEqual(json["schema_version"] as? Int, 3)
         XCTAssertNotNil(json["pushed_at"])
         XCTAssertNotNil(json["mac_hostname"])
         XCTAssertEqual(json["awake_held"] as? Bool, true)
@@ -315,6 +315,13 @@ final class LidCodePusherTest: XCTestCase {
         // the Zod schema marks them optional, and a literal null fails that.
         XCTAssertNil(json["memory"])
         XCTAssertNil(json["claude_accounts"])
+
+        // v3 status line. Unlike memory and accounts these are always derivable,
+        // so they ship on every push — the phone should never have to guess the
+        // state from `awake_held` alone.
+        XCTAssertEqual(json["status_kind"] as? String, "holding")
+        XCTAssertEqual(json["status_title"] as? String, "Keeping awake")
+        XCTAssertEqual(json["status_detail"] as? String, "Releases when work stops")
 
         // Verify no camelCase keys leaked through.
         XCTAssertNil(json["schemaVersion"])
