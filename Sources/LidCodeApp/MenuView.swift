@@ -276,6 +276,29 @@ struct MenuView: View {
         VStack(alignment: .leading, spacing: 6) {
             batteryBar
             thermalBar
+            pressureBar
+        }
+    }
+
+    /// Memory pressure bar, rendered inline with the hardware meters so all three
+    /// "can this hold survive?" readings sit together above the per-app breakdown.
+    ///
+    /// Shown only when `isMemoryWarningOn` is true and a memory snapshot is available —
+    /// the same guard `memorySection` uses. Level and colour are derived identically to
+    /// what the section below shows, so the two can never disagree.
+    @ViewBuilder
+    private var pressureBar: some View {
+        if setting.isMemoryWarningOn, let mem = snapshot.memory {
+            let level = mem.displayLevel(
+                warnSwapPercent: setting.memoryWarnSwapPercent,
+                criticalSwapPercent: setting.memoryCriticalSwapPercent)
+            BarGauge(
+                label: "Pressure",
+                fraction: memoryFraction(level: level),
+                color: memoryColor(level: level),
+                value: level.pushLabel.capitalized
+            )
+            .help("Memory pressure from the kernel. Normal / Warn / Critical derived from swap usage and kernel pressure level. See the Memory section below for per-process breakdown.")
         }
     }
 
@@ -322,9 +345,8 @@ struct MenuView: View {
     @ViewBuilder
     private var memorySection: some View {
         if setting.isMemoryWarningOn, let mem = snapshot.memory {
-            let level = mem.displayLevel(
-                warnSwapPercent: setting.memoryWarnSwapPercent,
-                criticalSwapPercent: setting.memoryCriticalSwapPercent)
+            // `level` is not needed here — the pressure bar moved to meterSection.
+            // Swap and used-percent still feed the section label trailing text.
             let swapPct = mem.swapTotalMegabyte > 0
                 ? Int((mem.swapUsedMegabyte / mem.swapTotalMegabyte * 100).rounded())
                 : 0
@@ -335,15 +357,9 @@ struct MenuView: View {
                 SectionLabel(text: "Memory", trailing: trailingLabel)
                     .help("Memory pressure from the kernel plus swap usage. Per-process figures sum RSS — shared frameworks are counted once per process that maps them, so the totals overcount physical usage. Use these for relative comparison, not exact accounting.")
 
-                // One bar for the overall effective level.
-                BarGauge(
-                    label: "Pressure",
-                    fraction: memoryFraction(level: level),
-                    color: memoryColor(level: level),
-                    value: level.pushLabel.capitalized
-                )
-
                 // Top consumers — name left, size right, no bar.
+                // The pressure bar itself lives in meterSection (with Battery and Temp)
+                // so all three hardware-signal bars are grouped in one place.
                 let rows = mem.app.prefix(setting.memoryAppRowCount)
                 ForEach(Array(rows.enumerated()), id: \.offset) { _, app in
                     HStack {
