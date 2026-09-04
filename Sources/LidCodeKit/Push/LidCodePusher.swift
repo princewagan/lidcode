@@ -249,6 +249,13 @@ public final class LidCodePusher: @unchecked Sendable {
     private var lastPushAt: Date = .distantPast
     private let heartbeatInterval: TimeInterval = 60
 
+    /// How many per-app memory rows are worth sending.
+    ///
+    /// The dashboard's `MEMORY_ROW_LIMIT` is twelve. This is that, plus headroom, so
+    /// the site can show a few more without waiting on a new Mac build. See the note
+    /// at the `app:` field in `buildPayload`.
+    private static let pushedAppLimit = 20
+
     /// When the current request started, or nil when idle.
     ///
     /// A plain Bool here is a trap: any path that fails to clear it wedges the
@@ -474,7 +481,16 @@ public final class LidCodePusher: @unchecked Sendable {
                 used_percent: min(100, max(0, mem.usedPercent)),
                 swap_used_mb: max(0, mem.swapUsedMegabyte),
                 swap_total_mb: max(0, mem.swapTotalMegabyte),
-                app: mem.app.isEmpty ? nil : mem.app.map {
+                // Only the heaviest apps travel. `MemoryReader` already returns this
+                // list sorted by megabyte descending, so a prefix is the top N and
+                // not an arbitrary slice.
+                //
+                // The whole list was going out — 347 entries, 19 KB of a 19.2 KB
+                // payload, on every push. The dashboard draws twelve rows. The other
+                // 335 were parsed, stored and re-served so that nothing could read
+                // them. Twenty is the twelve that are drawn plus headroom for the
+                // dashboard to raise its own limit without needing a new build here.
+                app: mem.app.isEmpty ? nil : mem.app.prefix(Self.pushedAppLimit).map {
                     LidCodeMemoryAppPayload(name: $0.name, mb: $0.megabyte, count: $0.count)
                 }
             )

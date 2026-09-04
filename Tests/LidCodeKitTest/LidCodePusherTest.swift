@@ -251,6 +251,50 @@ final class LidCodePusherTest: XCTestCase {
         XCTAssertEqual(apps[0]["count"] as? Int, 11)
     }
 
+    /// The per-app memory list is the whole payload if it is left uncapped.
+    ///
+    /// A real Mac reports around 350 distinct apps. Sending all of them made the
+    /// body 19 KB of which 19 KB was this one field, to draw twelve rows. The cap
+    /// is a prefix of an already-sorted list, so this also pins the ordering: the
+    /// heaviest apps are the ones that survive, not the first twenty encountered.
+    func testMemoryAppListIsCappedToTheHeaviest() throws {
+        let env = TempEnvFile(contents: "PUSH_SECRET=secret\n")
+        let stub = StubTransport()
+        let pusher = LidCodePusher(configPath: env.path, transport: stub.asTransport)
+
+        // 300 apps, descending by megabyte exactly as `MemoryReader` returns them.
+        let many = (0..<300).map {
+            MemoryApp(name: "app\($0)", megabyte: Double(3000 - $0), count: 1)
+        }
+        let snapshot = makeV2Snapshot(
+            memory: MemoryReading(
+                pressure: .warn,
+                usedPercent: 62.4,
+                swapUsedMegabyte: 998.56,
+                swapTotalMegabyte: 2048.0,
+                app: many,
+                readAt: Date()
+            )
+        )
+        pusher.pushIfChanged(snapshot, setting: .default)
+
+        let e = expectation(description: "request")
+        DispatchQueue.global().asyncAfter(deadline: .now() + 0.2) { e.fulfill() }
+        wait(for: [e], timeout: 1.0)
+
+        let body = try XCTUnwrap(stub.requests.first?.httpBody)
+        let json = try XCTUnwrap(JSONSerialization.jsonObject(with: body) as? [String: Any])
+        let memory = try XCTUnwrap(json["memory"] as? [String: Any])
+        let apps = try XCTUnwrap(memory["app"] as? [[String: Any]])
+
+        XCTAssertEqual(apps.count, 20, "300 apps must not travel; the dashboard draws twelve")
+        XCTAssertEqual(apps.first?["name"] as? String, "app0", "the heaviest app must survive")
+        XCTAssertEqual(apps.last?["name"] as? String, "app19", "the cap is a prefix, not a sample")
+
+        // The guard that matters is the byte count, not the element count.
+        XCTAssertLessThan(body.count, 4_000, "a status push must not carry a process listing")
+    }
+
     /// A signed-out account has no window at all, but Zod requires a number. It must
     /// go out as 0 with the real state in `status`, never as null.
     func testSignedOutAccountSendsZeroNotNull() throws {
