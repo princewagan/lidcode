@@ -27,8 +27,12 @@ public enum ShellCommand {
     ///    pipe deadlock — a child that writes more than the 64 KB pipe buffer blocks
     ///    in `write()` waiting for a reader that is blocked in `waitpid()`. `ps -Ao`
     ///    on a busy Mac is well over 64 KB.
-    /// 2. **The wait is a semaphore with a deadline**, not `waitUntilExit()`, which has
-    ///    no timeout form.
+    /// 2. **The child is reaped via `terminationHandler`**, not `waitUntilExit()`.
+    ///    Never call `waitUntilExit()` on a shared concurrent queue: it never returns
+    ///    until the child dies, permanently consuming a worker thread even after the
+    ///    caller gives up and moves on. Thirty such leaks fill libdispatch's 64-thread
+    ///    cap, the drain closure can no longer be scheduled, every subsequent command
+    ///    times out, and the app freezes until relaunch.
     ///
     /// The reader closure holds the only strong reference to its own buffer and always
     /// terminates when the pipe closes (which the kernel guarantees once the child is
@@ -54,6 +58,12 @@ public enum ShellCommand {
         // has a termination handler, but it fires before the pipe is necessarily
         // drained; the read loop ending *is* the "everything has arrived" signal.
         let finished = DispatchSemaphore(value: 0)
+        // Signalled by terminationHandler — set before run() so a fast child cannot race.
+        let exited = DispatchSemaphore(value: 0)
+
+        // Must be assigned before process.run() to avoid a race where a very fast child
+        // exits before the handler is installed.
+        process.terminationHandler = { _ in exited.signal() }
 
         do {
             try process.run()
@@ -68,6 +78,10 @@ public enum ShellCommand {
             while case let chunk = handle.availableData, !chunk.isEmpty {
                 output.append(chunk)
             }
+            // Release the read-end file descriptor promptly. Without this, ARC holds the
+            // Pipe — and its two fds — until the process object is deallocated, which can
+            // be much later. Closing here matches the actual end of use.
+            try? handle.close()
             finished.signal()
         }
 
@@ -85,21 +99,11 @@ public enum ShellCommand {
             return nil
         }
 
-        // Reaps the child. It has already closed stdout, so this cannot block for long,
-        // but the deadline is kept anyway — a zombie is cheaper than a hung queue.
-        _ = waitForExit(process, timeoutSecond: 1)
+        // Reap the child. It has already closed stdout (the drain loop ended), so this
+        // cannot block for long — but the timeout is kept anyway so a zombie cannot pin
+        // the caller. `DispatchSemaphore.wait(timeout:)` always returns; it cannot leak.
+        _ = exited.wait(timeout: .now() + 1)
         return String(decoding: output.data, as: UTF8.self)
-    }
-
-    /// `waitUntilExit()` on a background thread, raced against a deadline, so a child
-    /// that closed stdout but never actually died cannot pin the caller.
-    private static func waitForExit(_ process: Process, timeoutSecond: Double) -> Bool {
-        let done = DispatchSemaphore(value: 0)
-        readQueue.async {
-            process.waitUntilExit()
-            done.signal()
-        }
-        return done.wait(timeout: .now() + timeoutSecond) == .success
     }
 
     /// Concurrent on purpose: a blocked drain must never delay an unrelated command's

@@ -73,4 +73,60 @@ final class ShellCommandTest: XCTestCase {
         // not "nil on non-zero" — callers decide what an empty reading means.
         XCTAssertEqual(ShellCommand.run("/usr/bin/false", [], timeoutSecond: 5), "")
     }
+
+    /// Regression for the `waitUntilExit`-on-concurrent-queue thread leak.
+    ///
+    /// The defect: `waitForExit` dispatched `process.waitUntilExit()` onto `readQueue`
+    /// (a `.concurrent` libdispatch queue). When the caller timed out and returned, the
+    /// dispatched block stayed blocked in `waitUntilExit()` forever, permanently holding
+    /// a worker thread. libdispatch caps concurrent queues at 64 threads; once enough
+    /// leaked waiters accumulated, the drain closure could no longer be scheduled and
+    /// every subsequent `ShellCommand.run` timed out — the freeze the user reported.
+    ///
+    /// This test fires 20 guaranteed timeouts (sleep commands that far exceed the
+    /// budget) and measures the thread count before and after. With the old code each
+    /// timeout would park one thread permanently; 20 runs → 20 extra threads, a growth
+    /// of 20+. The fixed code uses `terminationHandler` whose semaphore signal is
+    /// instantaneous and never blocks a thread, so the count must not grow by more than
+    /// a small constant tied to transient scheduler activity.
+    func testRepeatedTimeoutsDoNotLeakWorkerThreads() throws {
+        let pid = ProcessInfo.processInfo.processIdentifier
+
+        func threadCount() -> Int {
+            // `ps -M` prints one line per thread for the given pid. The header line is
+            // always present, so the real count is lineCount - 1.
+            let result = ShellCommand.run("/bin/ps", ["-M", "-p", "\(pid)"], timeoutSecond: 5) ?? ""
+            let lines = result.split(separator: "\n", omittingEmptySubsequences: true)
+            return max(0, lines.count - 1)
+        }
+
+        // Warm up the queue so start-up thread creation does not skew the baseline.
+        for _ in 0..<3 {
+            XCTAssertNil(ShellCommand.run("/bin/sleep", ["10"], timeoutSecond: 0.15))
+        }
+        Thread.sleep(forTimeInterval: 0.3)
+
+        let before = threadCount()
+
+        // 20 commands that each guarantee a timeout. With the old code, every one of
+        // these would permanently park a worker thread in waitUntilExit().
+        for _ in 0..<20 {
+            XCTAssertNil(ShellCommand.run("/bin/sleep", ["10"], timeoutSecond: 0.15))
+        }
+
+        // Give the scheduler a moment to settle before counting.
+        Thread.sleep(forTimeInterval: 0.5)
+
+        let after = threadCount()
+        let growth = after - before
+
+        // Allow a generous slack of 8 threads for transient activity (drain closures in
+        // flight, the ps command itself). A true leak of 20 threads is far outside this.
+        XCTAssertLessThanOrEqual(
+            growth, 8,
+            "thread count grew by \(growth) after 20 timeouts — "
+            + "before=\(before) after=\(after); "
+            + "waitUntilExit() on a shared queue is likely back"
+        )
+    }
 }
