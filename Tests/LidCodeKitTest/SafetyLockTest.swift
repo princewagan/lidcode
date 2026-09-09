@@ -165,6 +165,7 @@ final class SafetyLockTest: XCTestCase {
         let runtime = makeRuntime(power)
         defer { runtime.shutdown() }
 
+        runtime.setAgentSessionForTest(runningSession())
         runtime.applyScanForTest(["claude"])
         runtime.tickForTest()
         for _ in 0..<5 {
@@ -181,6 +182,7 @@ final class SafetyLockTest: XCTestCase {
         let runtime = makeRuntime(power)
         defer { runtime.shutdown() }
 
+        runtime.setAgentSessionForTest(runningSession())
         runtime.applyScanForTest(["claude"])
         power.battery = BatteryReading(percent: floor - 5, isCharging: false, isOnMain: false)
         runtime.tickForTest()
@@ -231,6 +233,7 @@ final class SafetyLockTest: XCTestCase {
         let runtime = makeRuntime(power)
         defer { runtime.shutdown() }
 
+        runtime.setAgentSessionForTest(runningSession())
         runtime.applyScanForTest(["claude"])
         runtime.tickForTest()
 
@@ -253,6 +256,7 @@ final class SafetyLockTest: XCTestCase {
         let runtime = makeRuntime(power)
         defer { runtime.shutdown() }
 
+        runtime.setAgentSessionForTest(runningSession())
         runtime.applyScanForTest(["claude"])
         runtime.tickForTest()
         XCTAssertNotNil(runtime.snapshot.blockedBy)
@@ -604,11 +608,21 @@ final class GuardRuntimeTest: XCTestCase {
         return runtime
     }
 
+    private func runningSession() -> AgentSessionSnapshot {
+        let info = AgentSessionInfo(
+            id: "guard-runtime-session", agent: "claude", cwd: "/tmp/test",
+            project: "test", title: "Guard runtime test", titleSource: "cwd-basename",
+            status: .running, lastEvent: "tool_complete",
+            lastSeenAt: Date(), statusChangedAt: Date())
+        return AgentSessionSnapshot(sessions: [info])
+    }
+
     func testBatteryGuardOffResumesHoldingBelowTheSoftFloor() {
         let power = Power()
         let runtime = makeRuntime(power)
         defer { runtime.shutdown() }
 
+        runtime.setAgentSessionForTest(runningSession())
         runtime.applyScanForTest(["claude"])
         runtime.tickForTest()
         XCTAssertEqual(runtime.snapshot.blockedBy, .batteryFloor)
@@ -633,6 +647,7 @@ final class GuardRuntimeTest: XCTestCase {
         let runtime = makeRuntime(power)
         defer { runtime.shutdown() }
 
+        runtime.setAgentSessionForTest(runningSession())
         runtime.applyScanForTest(["claude"])
         runtime.setBatteryGuard(false)
         runtime.drainForTest()
@@ -649,6 +664,7 @@ final class GuardRuntimeTest: XCTestCase {
         let runtime = makeRuntime(power)
         defer { runtime.shutdown() }
 
+        runtime.setAgentSessionForTest(runningSession())
         runtime.applyScanForTest(["claude"])
         runtime.tickForTest()
         runtime.setBatteryGuard(false)
@@ -667,6 +683,7 @@ final class GuardRuntimeTest: XCTestCase {
         let runtime = makeRuntime(power)
         defer { runtime.shutdown() }
 
+        runtime.setAgentSessionForTest(runningSession())
         runtime.applyScanForTest(["claude"])
         runtime.tickForTest()
         runtime.setBatteryGuard(false)
@@ -692,6 +709,7 @@ final class GuardRuntimeTest: XCTestCase {
         let runtime = makeRuntime(power, setting: setting)
         defer { runtime.shutdown() }
 
+        runtime.setAgentSessionForTest(runningSession())
         runtime.applyScanForTest(["claude"])
         runtime.tickForTest()
         XCTAssertNil(runtime.snapshot.hotSinceSecond, "a cool machine has no clock running")
@@ -715,6 +733,7 @@ final class GuardRuntimeTest: XCTestCase {
         let runtime = makeRuntime(power, setting: setting)
         defer { runtime.shutdown() }
 
+        runtime.setAgentSessionForTest(runningSession())
         runtime.applyScanForTest(["claude"])
         power.thermal = ThermalReading(level: .serious)
         runtime.tickForTest()
@@ -738,6 +757,7 @@ final class GuardRuntimeTest: XCTestCase {
         let runtime = makeRuntime(power, setting: setting)
         defer { runtime.shutdown() }
 
+        runtime.setAgentSessionForTest(runningSession())
         runtime.applyScanForTest(["claude"])
         power.thermal = ThermalReading(level: .serious)
         runtime.tickForTest()
