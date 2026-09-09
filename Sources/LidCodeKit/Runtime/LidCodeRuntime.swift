@@ -140,6 +140,10 @@ public final class LidCodeRuntime: @unchecked Sendable {
     /// main thread. The results ride out through the snapshot like everything else.
     private let sessionReader: AgentSessionReader
     private var agentSession: AgentSessionSnapshot = .empty
+    /// A deterministic session source for runtime tests. Production always reads the
+    /// live session log; a test that explicitly injects a snapshot must retain it across
+    /// ticks instead of being silently replaced by the runner's empty log.
+    private var agentSessionForTest: AgentSessionSnapshot?
     private var usage: ClaudeUsage?
 
     /// Most recent memory reading. nil until the first tick, or when shell commands time out.
@@ -1256,7 +1260,7 @@ public final class LidCodeRuntime: @unchecked Sendable {
         // and a dictionary filter on the overwhelming majority of ticks. It still has
         // to happen here rather than in the view: they touch the filesystem, and the
         // main thread is not allowed to.
-        let newAgentSession = sessionReader.readAgentSession()
+        let newAgentSession = agentSessionForTest ?? sessionReader.readAgentSession()
         let newActiveCount = newAgentSession.activeCount
 
         // BUG 1 FIX: Cooldown clearing rule. After a .timerExpired stop, the cooldown
@@ -1539,7 +1543,10 @@ public final class LidCodeRuntime: @unchecked Sendable {
     /// Inject a synthetic agent session snapshot for testing.
     /// Allows tests to simulate an active session without a real warp.log.
     func setAgentSessionForTest(_ session: AgentSessionSnapshot) {
-        queue.sync { agentSession = session }
+        queue.sync {
+            agentSessionForTest = session
+            agentSession = session
+        }
     }
 
     /// Stop this runtime writing to `~/.lidcode/setting.json`.

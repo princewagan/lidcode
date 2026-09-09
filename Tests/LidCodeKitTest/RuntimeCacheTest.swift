@@ -104,8 +104,9 @@ final class RuntimeCacheTest: XCTestCase {
     }
 
     /// And the completion still arrives — on the main queue, so a caller can drive UI
-    /// state from it without a hop of its own. No helper is installed in a test, so the
-    /// expected outcome is a clean `helperMissing` rather than a hang.
+    /// state from it without a hop of its own. The runner may have a helper installed,
+    /// so the contract here is delivery and thread affinity, not a machine-specific
+    /// success or failure outcome.
     func testSetClamshellReportsFailureOnTheMainQueue() {
         let runtime = makeRuntime()
         defer { runtime.shutdown() }
@@ -113,9 +114,6 @@ final class RuntimeCacheTest: XCTestCase {
         let delivered = expectation(description: "completion delivered")
         runtime.setClamshell(true, second: nil, mode: .smart) { result in
             XCTAssertTrue(Thread.isMainThread, "completions are delivered on the main queue")
-            if case .success = result {
-                XCTFail("no helper is installed in a test environment")
-            }
             delivered.fulfill()
         }
         wait(for: [delivered], timeout: 5)
