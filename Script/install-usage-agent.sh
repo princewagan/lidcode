@@ -1,10 +1,10 @@
 #!/bin/bash
 #
-# install-usage-agent.sh — install the Claude usage fetcher as a launchd agent.
+# install-usage-agent.sh — install the usage fetcher as a launchd agent.
 #
 # The fetcher writes /tmp/warp-monitor-usage.json every five minutes; LidCode only
-# ever reads that file and never calls Anthropic itself. See Script/fetch-usage.py
-# for what it does and, more importantly, what it refuses to write down.
+# ever reads that file. See Script/fetch-usage.py for what it does and, more
+# importantly, what it refuses to write down.
 #
 # This runs as **you**, not as root. It has to: the credentials it reads live in
 # your login keychain, and a root daemon could not reach them without a prompt.

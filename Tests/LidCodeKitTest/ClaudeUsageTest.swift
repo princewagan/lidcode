@@ -216,7 +216,8 @@ final class ClaudeUsageReaderFileTest: XCTestCase {
 // Multi-account format tests
 // ---------------------------------------------------------------------------
 
-/// A multi-account payload with both accounts ok, in producer order (advo, prince).
+/// A multi-account payload with all three counters ok, in producer order
+/// (advo, prince, codex).
 private let multiAccountPayload = Data("""
 {
   "fetched_at": "2026-08-31T00:00:00Z",
@@ -239,6 +240,14 @@ private let multiAccountPayload = Data("""
       "severity": "warning",
       "five_hour": { "utilization": 72.0, "resets_at": "2026-08-31T05:00:00.000000+00:00" },
       "seven_day": { "utilization": 88.0, "resets_at": "2026-09-07T00:00:00.000000+00:00" }
+    },
+    {
+      "key": "codex",
+      "label": "CODEX",
+      "status": "ok",
+      "severity": "normal",
+      "five_hour": { "utilization": 31.0, "resets_at": "2026-08-31T03:00:00Z" },
+      "seven_day": { "utilization": 54.0, "resets_at": "2026-09-05T00:00:00Z" }
     }
   ]
 }
@@ -286,29 +295,34 @@ final class ClaudeAccountUsageParseTest: XCTestCase {
 
     func testMultiAccountParsePreservesProducerOrder() throws {
         let usage = try XCTUnwrap(ClaudeUsageReader.parse(multiAccountPayload, asOf: multiAccountFetchedAt))
-        XCTAssertEqual(usage.accounts.count, 2)
+        XCTAssertEqual(usage.accounts.count, 3)
         XCTAssertEqual(usage.accounts[0].key, "advo")
         XCTAssertEqual(usage.accounts[1].key, "prince")
+        XCTAssertEqual(usage.accounts[2].key, "codex")
     }
 
     func testMultiAccountParseDecodesLabels() throws {
         let usage = try XCTUnwrap(ClaudeUsageReader.parse(multiAccountPayload, asOf: multiAccountFetchedAt))
         XCTAssertEqual(usage.accounts[0].label, "ADVO")
         XCTAssertEqual(usage.accounts[1].label, "PRINCE")
+        XCTAssertEqual(usage.accounts[2].label, "CODEX")
     }
 
     func testMultiAccountParseDecodesStatuses() throws {
         let usage = try XCTUnwrap(ClaudeUsageReader.parse(multiAccountPayload, asOf: multiAccountFetchedAt))
         XCTAssertEqual(usage.accounts[0].status, "ok")
         XCTAssertEqual(usage.accounts[1].status, "ok")
+        XCTAssertEqual(usage.accounts[2].status, "ok")
     }
 
     func testMultiAccountParseDecodesUtilization() throws {
         let usage = try XCTUnwrap(ClaudeUsageReader.parse(multiAccountPayload, asOf: multiAccountFetchedAt))
         let advoUtil = try XCTUnwrap(usage.accounts[0].fiveHour).utilization
         let princeUtil = try XCTUnwrap(usage.accounts[1].fiveHour).utilization
+        let codexUtil = try XCTUnwrap(usage.accounts[2].fiveHour).utilization
         XCTAssertEqual(advoUtil, 8.0, accuracy: 0.001)
         XCTAssertEqual(princeUtil, 72.0, accuracy: 0.001)
+        XCTAssertEqual(codexUtil, 31.0, accuracy: 0.001)
     }
 
     func testMultiAccountParseDecodesSeverityPerAccount() throws {

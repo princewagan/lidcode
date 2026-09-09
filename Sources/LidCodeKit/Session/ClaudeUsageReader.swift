@@ -33,10 +33,10 @@ public struct UsageWindow: Codable, Sendable, Equatable {
     }
 }
 
-/// Usage data for a single Claude account.
+/// Usage data for one rate-limited coding account.
 ///
 /// The fetcher runs per-account and the reader preserves producer order — ADVO
-/// first, then PRINCE — so the UI can render them in a stable, predictable sequence
+/// first, then PRINCE, then CODEX — so the UI can render them in a stable, predictable sequence
 /// without sorting by key or label.
 public struct ClaudeAccountUsage: Codable, Sendable, Equatable {
     /// Short machine-readable key, e.g. "advo" or "prince".
@@ -130,7 +130,7 @@ public struct ClaudeUsage: Codable, Sendable, Equatable {
     public var fetchedAt: Date
     /// true when `fetchedAt` is older than `staleAfterSecond`.
     public var isStale: Bool
-    /// One entry per account in producer order (ADVO then PRINCE). Empty only when the
+    /// One entry per account in producer order (ADVO, PRINCE, then CODEX). Empty only when the
     /// file predates the multi-account format and synthesis failed for some reason — the
     /// UI falls back to the top-level windows in that case.
     public var accounts: [ClaudeAccountUsage]

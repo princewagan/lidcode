@@ -414,7 +414,7 @@ struct MenuView: View {
     @ViewBuilder
     private var usageSection: some View {
         if let usage = snapshot.usage {
-            // Render one block per account in producer order (ADVO first, then PRINCE).
+            // Render one block per account in producer order (ADVO, PRINCE, then CODEX).
             // Falling back to the single-block path when accounts is empty means an old
             // file format never causes a blank panel.
             //

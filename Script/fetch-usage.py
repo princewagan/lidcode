@@ -1,10 +1,11 @@
 #!/usr/bin/python3
 """
-fetch-usage.py — write Claude rate-limit usage to a file LidCode reads.
+fetch-usage.py — write coding-assistant rate-limit usage to a file LidCode reads.
 
-Reads the Anthropic OAuth credential for each configured account from the macOS
-keychain using /usr/bin/security (no TCC prompt required), polls the Anthropic
-usage endpoint per account, and writes a small JSON file to
+Reads the Anthropic OAuth credential for each configured Claude account from the
+macOS keychain using /usr/bin/security (no TCC prompt required), polls the
+Anthropic usage endpoint, reads Codex's locally-reported rate-limit snapshot,
+and writes a small JSON file to
 /tmp/warp-monitor-usage.json.
 
 No access token, refresh token, or credential blob is ever written to the output
@@ -127,6 +128,15 @@ ACCOUNTS = [
     ("advo",   "ADVO",   "/Users/princewagan/.claude-advo"),
     ("prince", "PRINCE", None),
 ]
+
+# Codex reports its current five-hour and weekly limits in its session event
+# stream. It is intentionally read locally: this keeps the collector free of
+# Codex credentials and uses the same aggregate values Codex presents to its
+# own UI. `expanduser` is important under launchd, where $HOME is still set but
+# a shell-specific CODEX_HOME often is not.
+CODEX_SESSIONS_DIR = os.path.expanduser("~/.codex/sessions")
+MAX_CODEX_SESSION_FILES = 32
+CODEX_TAIL_BYTES = 1_048_576
 
 
 # ---------------------------------------------------------------------------
@@ -615,6 +625,92 @@ def fetch_account(key: str, label: str, config_dir, as_of: str) -> dict:
     return result
 
 
+def _codex_reset_at(value) -> str:
+    """Convert Codex's Unix reset timestamp into the JSON format LidCode reads."""
+    if not isinstance(value, (int, float)):
+        raise ValueError("reset timestamp missing")
+    return datetime.fromtimestamp(value, tz=timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def _codex_usage_from_event(event: dict):
+    """Return the two windows from one Codex token-count event, or None."""
+    payload = event.get("payload")
+    if not isinstance(payload, dict) or payload.get("type") != "token_count":
+        return None
+    limits = payload.get("rate_limits")
+    if not isinstance(limits, dict):
+        return None
+    primary, secondary = limits.get("primary"), limits.get("secondary")
+    if not isinstance(primary, dict) or not isinstance(secondary, dict):
+        return None
+    try:
+        return {
+            "five_hour": {
+                "utilization": clamp(float(primary["used_percent"])),
+                "resets_at": _codex_reset_at(primary["resets_at"]),
+            },
+            "seven_day": {
+                "utilization": clamp(float(secondary["used_percent"])),
+                "resets_at": _codex_reset_at(secondary["resets_at"]),
+            },
+        }
+    except (KeyError, TypeError, ValueError, OverflowError, OSError):
+        return None
+
+
+def _recent_codex_session_files(root: str) -> list:
+    """Newest session logs first, bounded so a large history stays cheap to poll."""
+    candidates = []
+    try:
+        for directory, _, names in os.walk(root):
+            for name in names:
+                if not name.endswith(".jsonl"):
+                    continue
+                path = os.path.join(directory, name)
+                try:
+                    candidates.append((os.path.getmtime(path), path))
+                except OSError:
+                    continue
+    except OSError:
+        return []
+    candidates.sort(reverse=True)
+    return [path for _, path in candidates[:MAX_CODEX_SESSION_FILES]]
+
+
+def _last_codex_usage(path: str):
+    """Read the latest complete rate-limit event from the tail of one session."""
+    try:
+        with open(path, "rb") as source:
+            source.seek(0, os.SEEK_END)
+            size = source.tell()
+            source.seek(max(0, size - CODEX_TAIL_BYTES))
+            tail = source.read().decode("utf-8", errors="ignore")
+    except OSError:
+        return None
+
+    # A partially written final JSONL record is normal while Codex is running;
+    # reverse scanning lets us use the immediately preceding complete record.
+    for line in reversed(tail.splitlines()):
+        try:
+            event = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        usage = _codex_usage_from_event(event)
+        if usage is not None:
+            return usage
+    return None
+
+
+def fetch_codex_account(as_of: str) -> dict:
+    """Read CODEX's most recent local five-hour and weekly rate-limit snapshot."""
+    base = {"key": "codex", "label": "CODEX", "storage_dir": None}
+    for path in _recent_codex_session_files(CODEX_SESSIONS_DIR):
+        usage = _last_codex_usage(path)
+        if usage is not None:
+            return {**base, "status": "ok", "severity": "normal", "as_of": as_of, **usage}
+    return {**base, "status": "error", "error": "no Codex usage data found"}
+
+
 # ---------------------------------------------------------------------------
 # Last-good carry-forward
 # ---------------------------------------------------------------------------
@@ -685,10 +781,12 @@ def _worst_severity(accounts: list) -> str:
 
 
 def _best_ok_account(accounts: list):
-    """The ok account with the lowest five_hour utilisation, i.e. the most headroom."""
+    """The Claude account with the lowest five-hour utilisation, i.e. most headroom."""
     best, best_util = None, float("inf")
     for acct in accounts:
-        if acct.get("status") != "ok":
+        # These top-level fields predate the account list and still drive the
+        # Claude-only menu-bar fallback. CODEX must never become that fallback.
+        if acct.get("key") == "codex" or acct.get("status") != "ok":
             continue
         util = acct.get("five_hour", {}).get("utilization", float("inf"))
         if util < best_util:
@@ -705,10 +803,12 @@ def main() -> int:
     store = load_last_good()
 
     # One failure must never prevent the other accounts from being written.
+    # The Claude accounts come first by design; CODEX is the third, local source.
     accounts = []
     for key, label, config_dir in ACCOUNTS:
         result = fetch_account(key, label, config_dir, as_of=fetched_at)
         accounts.append(carry_forward(result, store))
+    accounts.append(carry_forward(fetch_codex_account(as_of=fetched_at), store))
 
     save_last_good(store, accounts)
 
