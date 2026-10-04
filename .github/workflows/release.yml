@@ -51,8 +51,15 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           RELEASE_VERSION: ${{ steps.version.outputs.version }}
         run: |
-          gh release create "v$RELEASE_VERSION" \
-            "dist/Lidcode-$RELEASE_VERSION.dmg" \
-            "dist/Lidcode-$RELEASE_VERSION.zip" dist/SHA256SUMS.txt \
-            --target "$GITHUB_SHA" --title "Lidcode $RELEASE_VERSION" \
-            --notes-file docs/INSTALL.md
+          if gh release view "v$RELEASE_VERSION" >/dev/null 2>&1; then
+            gh release upload "v$RELEASE_VERSION" \
+              "dist/Lidcode-$RELEASE_VERSION.dmg" \
+              "dist/Lidcode-$RELEASE_VERSION.zip" dist/SHA256SUMS.txt --clobber
+            gh release edit "v$RELEASE_VERSION" --title "Lidcode $RELEASE_VERSION" --notes-file docs/INSTALL.md
+          else
+            gh release create "v$RELEASE_VERSION" \
+              "dist/Lidcode-$RELEASE_VERSION.dmg" \
+              "dist/Lidcode-$RELEASE_VERSION.zip" dist/SHA256SUMS.txt \
+              --target "$GITHUB_SHA" --title "Lidcode $RELEASE_VERSION" \
+              --notes-file docs/INSTALL.md
+          fi
