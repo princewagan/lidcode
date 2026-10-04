@@ -36,9 +36,8 @@ NSGraphicsContext.saveGraphicsState()
 NSGraphicsContext.current = NSGraphicsContext(bitmapImageRep: rep)
 let context = NSGraphicsContext.current!.cgContext
 
-// Cool near-black rather than neutral grey: the tint is a deep teal, and a warm
-// ground drags it toward olive.
-color("0B1413").setFill()
+// Cool near-black complements the blue app accent.
+color("0B1220").setFill()
 NSRect(x: 0, y: 0, width: width, height: height).fill()
 
 // A wide, very soft glow behind the mark, so the panel does not look like flat
@@ -58,6 +57,13 @@ context.restoreGState()
 
 let side: CGFloat = 200
 let squircle = CGRect(x: (width - side) / 2, y: height * 0.545, width: side, height: side)
+if let artwork = NSImage(contentsOfFile: "Asset/app-icon.png") {
+    NSGraphicsContext.current?.imageInterpolation = .high
+    let canvasSide = side
+    artwork.draw(in: NSRect(x: squircle.midX - canvasSide / 2,
+                           y: squircle.midY - canvasSide / 2,
+                           width: canvasSide, height: canvasSide))
+} else {
 let radius = side * (185.0 / 824.0)
 let path = CGPath(roundedRect: squircle, cornerWidth: radius, cornerHeight: radius, transform: nil)
 
@@ -88,6 +94,8 @@ if let symbol = NSImage(systemSymbolName: "laptopcomputer", accessibilityDescrip
     white.draw(in: NSRect(x: squircle.midX - target.width / 2,
                           y: squircle.midY - target.height / 2 + side * 0.012,
                           width: target.width, height: target.height))
+}
+
 }
 
 // MARK: - Type

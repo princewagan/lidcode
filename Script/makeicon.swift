@@ -1,7 +1,7 @@
-// Renders the LidCode app icon: a macOS-style rounded square in a given tint
-// with a white laptop glyph, emitted at every size an .icns needs.
+// Exports the LidCode master artwork at every size an .icns needs.
+// A hex tint remains supported for rendering the original laptop glyph.
 //
-//   swift makeicon.swift <hex> <output.iconset>
+//   swift makeicon.swift <source.png|hex> <output.iconset>
 
 import AppKit
 
@@ -13,6 +13,17 @@ guard argument.count == 3 else {
 
 let hex = argument[1].hasPrefix("#") ? String(argument[1].dropFirst()) : argument[1]
 let iconsetPath = argument[2]
+let sourceImage: NSImage?
+if FileManager.default.fileExists(atPath: argument[1]) {
+    guard let loaded = NSImage(contentsOfFile: argument[1]), loaded.size.width > 0,
+          loaded.size.width == loaded.size.height else {
+        FileHandle.standardError.write("source artwork must be a readable square image\n".data(using: .utf8)!)
+        exit(1)
+    }
+    sourceImage = loaded
+} else {
+    sourceImage = nil
+}
 
 func color(_ hex: String, brightness: CGFloat = 1.0) -> NSColor {
     var value: UInt64 = 0
@@ -97,6 +108,7 @@ func write(_ image: NSImage, pixel: Int, to path: String) {
     rep.size = NSSize(width: pixel, height: pixel)
     NSGraphicsContext.saveGraphicsState()
     NSGraphicsContext.current = NSGraphicsContext(bitmapImageRep: rep)
+    NSGraphicsContext.current?.imageInterpolation = .high
     image.draw(in: NSRect(x: 0, y: 0, width: pixel, height: pixel))
     NSGraphicsContext.restoreGraphicsState()
     try! rep.representation(using: .png, properties: [:])!.write(to: URL(fileURLWithPath: path))
@@ -115,7 +127,7 @@ for entry in variant {
     let pixel = entry.point * entry.scale
     let suffix = entry.scale == 1 ? "" : "@2x"
     let name = "icon_\(entry.point)x\(entry.point)\(suffix).png"
-    write(render(size: CGFloat(pixel)), pixel: pixel, to: "\(iconsetPath)/\(name)")
+    write(sourceImage ?? render(size: CGFloat(pixel)), pixel: pixel, to: "\(iconsetPath)/\(name)")
 }
 
 print("wrote \(iconsetPath)")

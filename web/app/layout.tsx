@@ -5,6 +5,10 @@ export const metadata: Metadata = {
   title: "LidCode",
   description: "Your Mac's lid, battery, thermals and agent sessions.",
   manifest: "/manifest.webmanifest",
+  icons: {
+    icon: "/icon-192.png",
+    apple: "/apple-touch-icon.png",
+  },
   appleWebApp: {
     capable: true,
     statusBarStyle: "black-translucent",
