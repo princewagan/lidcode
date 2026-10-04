@@ -18,8 +18,8 @@ final class SettingGuardTest: XCTestCase {
 
     func testDefaultsMatchTheContract() {
         XCTAssertEqual(Setting.default.sustainedHeatSecond, 900)
-        // J6: max changed from 8h to 3h — default holdSecond is now 3h.
-        XCTAssertEqual(Setting.default.holdSecond, 3 * 3600)
+        // The current default is one hour; the slider maximum remains three hours.
+        XCTAssertEqual(Setting.default.holdSecond, 3600)
     }
 
     func testDefaultIsAlreadyNormalized() {
@@ -55,8 +55,8 @@ final class SettingGuardTest: XCTestCase {
         XCTAssertTrue(decoded.isBatteryGuardOn)
         XCTAssertTrue(decoded.isThermalGuardOn)
         XCTAssertEqual(decoded.sustainedHeatSecond, 900)
-        // J6: max changed to 3h — an older file without holdSecond gets the new default.
-        XCTAssertEqual(decoded.holdSecond, 3 * 3600)
+        // An older file without holdSecond gets the current one-hour default.
+        XCTAssertEqual(decoded.holdSecond, 3600)
     }
 
     func testEmptyObjectDecodesToDefaults() throws {
