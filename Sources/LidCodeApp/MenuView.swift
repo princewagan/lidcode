@@ -3,16 +3,28 @@ import LidCodeKit
 
 /// Lidcode controls alongside the OpenUsage-style provider dashboard.
 struct MenuView: View {
+    @AppStorage("showMemoryList") private var showMemoryList = true
+    @AppStorage("appTheme") private var themeName = AppTheme.blue.rawValue
+    private var theme: AppTheme { AppTheme(rawValue: themeName) ?? .blue }
+
     @ObservedObject var model: AppModel
+    var contentOnly = false
 
     private var snapshot: RuntimeSnapshot { model.snapshot }
     private var setting: Setting { model.setting }
 
     var body: some View {
-        VStack(spacing: 0) {
+        if contentOnly {
             content
-            DashboardFooter(model: model)
-        }.frame(width: DashboardTheme.width).background(DashboardTheme.tray)
+        } else {
+            VStack(alignment: .trailing, spacing: 6) {
+                VStack(spacing: 0) {
+                    content
+                    DashboardFooter(model: model)
+                }.frame(width: model.dashboardWidth).background(DashboardTheme.tray)
+                if model.isOptionsOpen { DashboardOptions(model: model) }
+            }
+        }
     }
 
     var content: some View {
@@ -21,39 +33,48 @@ struct MenuView: View {
             VStack(alignment: .leading, spacing: 14) {
                 switch model.screen {
                 case .dashboard:
-                    ProviderDashboard(model: model)
                     VStack(alignment: .leading, spacing: 10) {
                         header
                         control
-                        warningRow
                         sliderSection
                         meterSection
                     }.padding(14).dashboardCard()
+                    ProviderDashboard(model: model)
                     sessionSection
-                    foreignBlockerRow
+                    memorySection
+                case .about:
+                    Text("Lidcode \(LidCodeVersion.current)").font(.title3)
+                    Text("Keep your Mac awake while your agents work.")
+                    Link("Releases & updates", destination: URL(string: "https://github.com/princewagan/lidcode/releases/latest")!)
                 case .customize:
                     CustomizeProviders(model: model)
                 case .settings:
                     SettingSection(model: model, isExpanded: .constant(true))
                         .padding(14).dashboardCard()
-                    memorySection
-                    Button("Install lidcode command") { model.installCLI() }
-                        .buttonStyle(.bordered)
-                    if let message = model.cliInstallMessage {
-                        Text(message).font(.system(size: 11)).foregroundStyle(.secondary)
+                    VStack(alignment: .leading, spacing: 6) {
+                        Button("Enable Terminal command") { model.installCLI() }
+                            .buttonStyle(.bordered)
+                            .help("Control Lidcode from Terminal or scripts.")
+                        if let message = model.cliInstallMessage {
+                            Text(message).font(.system(size: 11)).foregroundStyle(.secondary)
+                        }
                     }
-                    Link("Downloads & setup", destination: URL(string: "https://github.com/princewagan/lidcode/releases/latest")!)
-                        .font(.system(size: 12))
+
                 }
             }.padding(14)
+                .id(model.screen)
+                .transition(.opacity.animation(.easeInOut(duration: 0.12)))
+                .animation(.easeInOut(duration: 0.12), value: model.screen)
         }
-        .frame(width: DashboardTheme.width)
+        .frame(width: model.dashboardWidth)
+        .frame(minHeight: 250, alignment: .top)
+        .tint(theme.color)
         .background(DashboardTheme.tray)
     }
 
     private var navigationBar: some View {
         ZStack {
-            Text(model.screen == .customize ? "Customize" : "Settings")
+            Text(model.screen == .customize ? "Customize" : model.screen == .about ? "About Lidcode" : "Settings")
                 .font(.system(size: 14, weight: .semibold))
             HStack {
                 Button { model.screen = .dashboard } label: {
@@ -102,7 +123,7 @@ struct MenuView: View {
         .help(statusDetail)
     }
 
-    /// C3: "Keeping awake · N active sessions" (singular when 1)
+    /// C3: "Keeping awake · N active"
     /// C4: "Waiting for a session" when mode ON but nothing running
     ///
     /// The wording and the precedence behind it live on `RuntimeSnapshot` so the
@@ -110,13 +131,17 @@ struct MenuView: View {
     /// here is what let the dashboard fall behind the menu in the first place.
     private var statusColor: Color {
         switch snapshot.displayStatus.kind {
-        case .stalled, .blocked:   return Palette.brandDeep
-        case .holding:             return Palette.brand
-        case .waiting, .paused, .idle: return Palette.brandSoft
+        case .stalled, .blocked:   return Color(nsColor: .systemRed)
+        case .holding:             return theme.color
+        case .waiting, .paused, .idle: return theme.color.opacity(0.65)
         }
     }
 
-    private var statusTitle: String { snapshot.displayStatus.title }
+    private var statusTitle: String {
+        snapshot.displayStatus.title
+            .replacingOccurrences(of: " active sessions", with: " active")
+            .replacingOccurrences(of: " active session", with: " active")
+    }
 
     private var statusDetail: String { snapshot.displayStatus.detail }
 
@@ -134,29 +159,13 @@ struct MenuView: View {
     private var control: some View {
         VStack(alignment: .leading, spacing: 8) {
             PowerButton(
-                isEnabled: model.isEnabled,
+                isEnabled: model.buttonIsEnabled,
                 isSwitching: model.isSwitching,
-                isProtected: snapshot.isClamshellActive,
+                isProtected: model.buttonIsProtected,
                 isGuardBlocked: snapshot.blockedBy != nil && !snapshot.isGuardOverrideOn,
                 isGuardOverride: snapshot.isGuardOverrideOn,
                 onToggle: { _ in handleButtonCycle() }
             )
-
-            if !model.isHelperReady { helperRow }
-            // Only when `warningRow` has nothing to say.
-            //
-            // The two rows have overlapping sources: `warningRow` reads the hardware
-            // directly, while `alert` carries whatever the governor last announced — and
-            // for a hot Mac the governor announces the heat. So the panel printed
-            // "Thermal pressure Serious. Check airflow" and, two rows down, "Temp is high
-            // — cool your Mac": one fact, twice, in two different voices.
-            //
-            // `warningRow` wins because it is derived from the current reading rather than
-            // from the last event, so it cannot go stale. `alert` still gets the rows
-            // `warningRow` cannot produce — a lost helper, a dead CLI socket — and it
-            // still fires the notification either way, which is the part that matters when
-            // nobody is looking at the panel.
-            if warningText == nil, let alert = model.alert { alertRow(alert) }
         }
     }
 
@@ -196,11 +205,6 @@ struct MenuView: View {
             Spacer(minLength: 4)
             if model.isInstallingHelper {
                 ProgressView().controlSize(.small)
-            } else if HelperInstaller.canInstall {
-                Button("Install…") { model.installHelper() }
-                    .buttonStyle(.borderless)
-                    .controlSize(.small)
-                    .tint(Palette.brand)
             }
         }
         .frame(height: 18)
@@ -212,7 +216,7 @@ struct MenuView: View {
     private func alertRow(_ alert: String) -> some View {
         Text(alert)
             .font(.system(size: 10))
-            .foregroundStyle(Palette.brandDeep)
+            .foregroundStyle(Color(nsColor: .systemRed))
             .lineLimit(1)
             .truncationMode(.tail)
             .frame(height: 14, alignment: .leading)
@@ -221,55 +225,47 @@ struct MenuView: View {
 
     // MARK: - Warning row (G1-G3)
 
-    /// Hardware-state driven warnings — always reflect real conditions, never button state.
-    /// G1: non-blocking high temp → orange text
-    /// G2: blocking high temp → shows real elapsed minutes
-    /// G3: blocking battery → real battery percent
     @ViewBuilder
     private var warningRow: some View {
         if let text = warningText {
-            Text(text)
+            Label(text, systemImage: "exclamationmark.triangle.fill")
                 .font(.system(size: 10))
                 .foregroundStyle(warningColor)
-                .lineLimit(1)
-                .truncationMode(.tail)
-                .frame(height: 14, alignment: .leading)
+                .fixedSize(horizontal: false, vertical: true)
                 .animation(.easeOut(duration: 0.15), value: text)
         }
     }
 
+    private var memoryWarningLevel: MemoryPressureLevel {
+        guard setting.isMemoryWarningOn, let memory = snapshot.memory else { return .normal }
+        return memory.displayLevel(warnSwapPercent: setting.memoryWarnSwapPercent,
+                                   criticalSwapPercent: setting.memoryCriticalSwapPercent)
+    }
+
     private var warningText: String? {
-        let thermal = snapshot.thermal
-        let battery = snapshot.battery
-
-        // G2: blocking high temp — show elapsed minutes
-        if let blocked = snapshot.blockedBy {
-            if case .thermalCritical = blocked {
-                let minutes = snapshot.hotSinceSecond.map { $0 / 60 } ?? 0
-                return "Paused — high temp for ~\(minutes) minute\(minutes == 1 ? "" : "s")"
-            }
-            // G3: blocking battery — show real percent
-            if case .batteryFloor = blocked {
-                let pct = battery.percent.map { "\($0)%" } ?? "low"
-                return "Paused — battery at \(pct)"
-            }
+        var messages: [String] = []
+        if snapshot.thermal.level >= .serious {
+            let heat = snapshot.thermal.level == .critical ? "Very hot" : "Hot"
+            messages.append("\(heat) — check airflow")
+        } else if case .thermalCritical? = snapshot.blockedBy {
+            messages.append("Cooling down")
         }
-
-        // G1: non-blocking high temp. One sentence, with the reading in it, so this row
-        // and the temperature bar directly above it cannot appear to disagree.
-        if thermal.level >= .serious {
-            if let celsius = thermal.celsius {
-                return "Running hot at \(Int(celsius.rounded()))° — check airflow"
-            }
-            return "Running hot — check airflow"
+        if case .thermalCritical? = snapshot.blockedBy {
+            messages[0] = "Paused · " + messages[0]
         }
-
-        return nil
+        if case .batteryFloor? = snapshot.blockedBy {
+            messages.append("Paused — low battery")
+        }
+        if memoryWarningLevel >= .warn {
+            messages.append("\(memoryWarningLevel == .critical ? "Memory very low" : "Memory low") — close unused apps")
+        }
+        return messages.isEmpty ? nil : messages.joined(separator: "\n")
     }
 
     private var warningColor: Color {
-        if snapshot.blockedBy != nil { return Palette.brandDeep }
-        return Palette.brand   // non-blocking warning in brand orange
+        let critical = snapshot.thermal.level == .critical
+            || memoryWarningLevel == .critical || snapshot.blockedBy != nil
+        return Color(nsColor: critical ? .systemRed : .systemOrange)
     }
 
     // MARK: - Meters
@@ -277,30 +273,13 @@ struct MenuView: View {
     private var meterSection: some View {
         VStack(alignment: .leading, spacing: 6) {
             batteryBar
-            thermalBar
-            pressureBar
-        }
-    }
-
-    /// Memory pressure bar, rendered inline with the hardware meters so all three
-    /// "can this hold survive?" readings sit together above the per-app breakdown.
-    ///
-    /// Shown only when `isMemoryWarningOn` is true and a memory snapshot is available —
-    /// the same guard `memorySection` uses. Level and colour are derived identically to
-    /// what the section below shows, so the two can never disagree.
-    @ViewBuilder
-    private var pressureBar: some View {
-        if setting.isMemoryWarningOn, let mem = snapshot.memory {
-            let level = mem.displayLevel(
-                warnSwapPercent: setting.memoryWarnSwapPercent,
-                criticalSwapPercent: setting.memoryCriticalSwapPercent)
-            BarGauge(
-                label: "Pressure",
-                fraction: memoryFraction(level: level),
-                color: memoryColor(level: level),
-                value: level.pushLabel.capitalized
-            )
-            .help("Memory pressure from the kernel. Normal / Warn / Critical derived from swap usage and kernel pressure level. See the Memory section below for per-process breakdown.")
+            VStack(alignment: .leading, spacing: 6) {
+                thermalBar
+                memoryBar
+                warningRow
+                if warningText == nil, let alert = model.alert { alertRow(alert) }
+                if !model.isHelperReady { helperRow }
+            }
         }
     }
 
@@ -314,7 +293,7 @@ struct MenuView: View {
                 percent: percent,
                 setting: setting.softBatteryPercent,
                 hard: setting.hardBatteryPercent,
-                isOnMain: battery.isOnMain),
+                isOnMain: battery.isOnMain, accent: theme.color),
             value: battery.isOnMain ? "AC" : (percent.map { "\($0)%" } ?? "—")
         )
         .help(percent.map { "\($0)% · \(battery.sourceDisplay)" } ?? battery.sourceDisplay)
@@ -327,7 +306,7 @@ struct MenuView: View {
             label: "Temp",
             fraction: celsius.map { min(1, max(0.04, ($0 - 30) / (ThermalThreshold.criticalCelsius - 30))) }
                 ?? Double(thermal.level.rank + 1) / 4,
-            color: Palette.color(for: thermal.level),
+            color: Palette.color(for: thermal.level, accent: theme.color),
             value: celsius.map { "\(Int($0.rounded()))°" } ?? "—"
         )
         .help(celsius == nil
@@ -335,33 +314,40 @@ struct MenuView: View {
               : "Hottest CPU die sensor · \(thermal.level.display.lowercased())")
     }
 
+    private var memoryBar: some View {
+        let memory = snapshot.memory
+        let level = memory?.displayLevel(
+            warnSwapPercent: setting.memoryWarnSwapPercent,
+            criticalSwapPercent: setting.memoryCriticalSwapPercent)
+        return BarGauge(
+            label: "Memory",
+            fraction: (memory?.usedPercent ?? 0) / 100,
+            color: level == .critical ? Palette.brandDeep
+                : level == .warn ? Color(nsColor: .systemOrange) : theme.color.opacity(0.65),
+            value: memory.map { "\(Int($0.usedPercent.rounded()))%" } ?? "—"
+        )
+        .help("Percentage of your Mac’s RAM currently in use")
+    }
+
     // MARK: - Memory
 
-    /// Memory pressure section — display-only, never ends a hold.
+    /// Memory usage section — display-only, never ends a hold.
     ///
-    /// Hidden when `isMemoryWarningOn` is false or when no reading is available. The
+    /// Hidden when the memory list preference is off or no reading is available. The
     /// per-process rows sum RSS (resident set size), which counts shared frameworks once
     /// per process that maps them, so the total across rows overcounts physical usage.
     /// This matches what Activity Monitor shows and is what users recognise, but it is
     /// not a unique-memory figure. The tooltip on the section label says so.
     @ViewBuilder
     private var memorySection: some View {
-        if setting.isMemoryWarningOn, let mem = snapshot.memory {
-            // `level` is not needed here — the pressure bar moved to meterSection.
-            // Swap and used-percent still feed the section label trailing text.
-            let swapPct = mem.swapTotalMegabyte > 0
-                ? Int((mem.swapUsedMegabyte / mem.swapTotalMegabyte * 100).rounded())
-                : 0
-
-            let trailingLabel = "\(Int(mem.usedPercent.rounded()))% · swap \(swapPct)%"
+        if showMemoryList, let mem = snapshot.memory {
+            let trailingLabel = "\(Int(mem.usedPercent.rounded()))% used"
 
             VStack(alignment: .leading, spacing: 6) {
                 SectionLabel(text: "Memory", trailing: trailingLabel)
-                    .help("Memory pressure from the kernel plus swap usage. Per-process figures sum RSS — shared frameworks are counted once per process that maps them, so the totals overcount physical usage. Use these for relative comparison, not exact accounting.")
+                    .help("Memory usage. Per-process figures sum RSS — shared frameworks are counted once per process that maps them, so the totals overcount physical usage. Use these for relative comparison, not exact accounting.")
 
                 // Top consumers — name left, size right, no bar.
-                // The pressure bar itself lives in meterSection (with Battery and Temp)
-                // so all three hardware-signal bars are grouped in one place.
                 let rows = mem.app.prefix(setting.memoryAppRowCount)
                 ForEach(Array(rows.enumerated()), id: \.offset) { _, app in
                     HStack {
@@ -381,28 +367,6 @@ struct MenuView: View {
         }
     }
 
-    /// Map the effective level to a 0...1 fraction for the bar gauge.
-    ///
-    /// Three steps (normal / warn / critical) rendered across a continuous scale:
-    /// normal = 0...0.33, warn = 0.34...0.66, critical = 0.67...1.0. A fixed
-    /// fraction is used rather than a raw kernel integer so the bar stays at a stable
-    /// position within each band regardless of pressure sub-levels the kernel may add.
-    private func memoryFraction(level: MemoryPressureLevel) -> Double {
-        switch level {
-        case .normal:   return 0.15
-        case .warn:     return 0.55
-        case .critical: return 0.90
-        }
-    }
-
-    private func memoryColor(level: MemoryPressureLevel) -> Color {
-        switch level {
-        case .normal:   return Palette.brandSoft
-        case .warn:     return Palette.brand           // orange — informational
-        case .critical: return Palette.brandDeep       // deep red — serious
-        }
-    }
-
     /// Format a megabyte value as "X.XX GB" when >= 1024, "XXX MB" below.
     private func memoryAppSize(_ megabyte: Double) -> String {
         if megabyte >= 1024 {
@@ -417,6 +381,7 @@ struct MenuView: View {
     private var sliderSection: some View {
         DurationSlider(
             second: setting.holdSecond,
+            isEnabled: model.isEnabled,
             onCommit: { model.setHoldSecond($0) },
             // Freezes the panel's own re-layout for the duration of the drag. Without it
             // the five-second publish re-measures and re-frames the window mid-gesture.
@@ -514,4 +479,10 @@ struct MenuView: View {
         if s < 3600 { return "\(s / 60)m ago" }
         return "\(s / 3600)h ago"
     }
+}
+
+/// Host MenuView itself so its AppStorage and model observation remain active.
+struct DashboardContent: View {
+    @ObservedObject var model: AppModel
+    var body: some View { MenuView(model: model, contentOnly: true) }
 }

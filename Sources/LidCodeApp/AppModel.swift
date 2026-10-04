@@ -20,6 +20,7 @@ final class AppModel: ObservableObject {
     /// activity, settings — and each disclosure was a section that had to be read past
     /// to reach the switch. The other three sections are gone; see `MenuView`.
     @Published var isSettingExpanded = false
+    @Published var isOptionsOpen = false
     @Published var screen: DashboardScreen = .dashboard
     @Published private(set) var profiles: [AIProfile] = []
     @Published private(set) var isRefreshingUsage = false
@@ -29,7 +30,7 @@ final class AppModel: ObservableObject {
     private var usageTimer: Task<Void, Never>?
     private var usageGeneration = 0
 
-    enum DashboardScreen { case dashboard, customize, settings }
+    enum DashboardScreen { case dashboard, customize, settings, about }
     @Published private(set) var cliInstallMessage: String?
 
     func installCLI() {
@@ -57,9 +58,16 @@ final class AppModel: ObservableObject {
 
 
     /// Render fixtures only: never starts the runtime or reads credentials.
-    func configurePreview(empty: Bool = false) {
-        profiles = empty ? [] : [AIProfile(id: "preview-claude", provider: .claude, name: "Claude"),
-                                 AIProfile(id: "preview-codex", provider: .codex, name: "Codex")]
+    func configurePreview(empty: Bool = false, hot: Bool = false, memoryAlert: Bool = false, accountCount: Int = 2, veryHot: Bool = false, memoryWarn: Bool = false) {
+        snapshot.memory = MemoryReading(pressure: memoryAlert ? .critical : memoryWarn ? .warn : .normal, usedPercent: memoryAlert ? 92 : 62,
+                                        swapUsedMegabyte: 0, swapTotalMegabyte: 0, app: [], readAt: Date())
+        if veryHot { snapshot.thermal = ThermalReading(level: .critical, celsius: 97) }
+        else if hot { snapshot.thermal = ThermalReading(level: .serious, celsius: 85) }
+        profiles = empty ? [] : (0..<accountCount).map { index in
+            AIProfile(id: "preview-\(index)", provider: index % 2 == 0 ? .claude : .codex,
+                      name: index < 2 ? (index == 0 ? "Claude" : "Codex") : "Work \(index + 1)",
+                      directory: "~/.lidcode/profiles/preview-\(index)")
+        }
         let now = Date()
         let accounts = profiles.enumerated().map { index, profile in
             ClaudeAccountUsage(key: profile.id, label: profile.name, provider: profile.provider.rawValue,
@@ -75,7 +83,9 @@ final class AppModel: ObservableObject {
     func loadProfiles() {
         do {
             if FileManager.default.fileExists(atPath: AIProfileStore.url.path) {
-                profiles = try AIProfileStore.load()
+                let saved = try AIProfileStore.load()
+                profiles = AIProfileStore.separatingDuplicates(saved)
+                if saved != profiles { try AIProfileStore.save(profiles) }
             } else {
                 profiles = AIProfileStore.detectedDefaults()
                 try AIProfileStore.save(profiles)
@@ -90,6 +100,23 @@ final class AppModel: ObservableObject {
             profileError = nil
             refreshUsage()
         } catch { profileError = "Could not save profiles. Use a name and an absolute profile path." }
+    }
+
+    var dashboardWidth: CGFloat {
+        DashboardTheme.width
+    }
+
+    func signIn(_ profile: AIProfile) {
+        do {
+            try FileManager.default.createDirectory(atPath: profile.expandedDirectory, withIntermediateDirectories: true,
+                                                    attributes: [.posixPermissions: 0o700])
+            let scriptURL = FileManager.default.temporaryDirectory.appendingPathComponent("lidcode-signin-\(UUID().uuidString).command")
+            let script = "#!/bin/zsh\n" + AIProfileStore.signInCommand(for: profile) + "\n"
+            try script.write(to: scriptURL, atomically: true, encoding: .utf8)
+            try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: scriptURL.path)
+            guard NSWorkspace.shared.open(scriptURL) else { throw CocoaError(.fileReadUnknown) }
+            profileError = nil
+        } catch { profileError = "Could not open Terminal for sign in." }
     }
 
     func refreshUsage() {
@@ -130,7 +157,10 @@ final class AppModel: ObservableObject {
         runtime.onChange = { [weak self] snapshot in
             Task { @MainActor in
                 guard let self else { return }
-                self.snapshot = snapshot
+                self.snapshot = self.runtime.snapshot
+                if self.isSwitching, !self.switchTargetEnabled, !self.isEnabled {
+                    self.isSwitching = false
+                }
                 // The log and the metric history are deliberately *not* pulled here any
                 // more. Both were copied out of the runtime on every publish — a 12-entry
                 // log and 48 samples, every 5 seconds, on the main actor, to feed an
@@ -199,6 +229,19 @@ final class AppModel: ObservableObject {
     /// broken for those few hundred milliseconds.
     @Published private(set) var isSwitching = false
 
+    private var switchTargetEnabled = false
+    private var switchStartedEnabled = false
+    private var switchStartedProtected = false
+    var buttonIsEnabled: Bool { isSwitching ? switchStartedEnabled : isEnabled }
+    var buttonIsProtected: Bool { isSwitching ? switchStartedProtected : snapshot.isClamshellActive }
+
+    private func beginSwitching(to enabled: Bool) {
+        switchTargetEnabled = enabled
+        switchStartedEnabled = isEnabled
+        switchStartedProtected = snapshot.isClamshellActive
+        isSwitching = true
+    }
+
     /// The single enable/disable action.
     ///
     /// Turning it on asks for closed-lid protection and falls back to a plain hold when
@@ -210,16 +253,18 @@ final class AppModel: ObservableObject {
         guard !isSwitching else { return }
 
         guard isOn else {
-            isSwitching = true
+            beginSwitching(to: false)
             runtime.setClamshell(false, second: nil, mode: .manual) { [weak self] _ in
                 guard let self else { return }
                 self.runtime.endHold(reason: .userStopped)
-                self.isSwitching = false
             }
             return
         }
 
-        let second = setting.holdSecond
+        let second = max(setting.holdSecond, Setting.holdStepSecond)
+        if setting.holdSecond == 0 {
+            setting = runtime.updateSetting(SettingPatch(holdSecond: second))
+        }
         // Picking a capability you do not have yet should install it, not scold you. The
         // password prompt is a better answer than an error banner.
         guard HelperInstaller.isInstalled else {
@@ -237,20 +282,21 @@ final class AppModel: ObservableObject {
     }
 
     private func enableClamshell(second: Int) {
-        isSwitching = true
+        beginSwitching(to: true)
         // Manual mode: hold for the full duration regardless of whether an agent session
         // is running. Smart mode would kill a by-hand hold after 10 minutes of idleness —
         // a hold the user explicitly turned on and timed on the slider should not die
         // in the background because no Claude session happened to be active.
         runtime.setClamshell(true, second: second, mode: .manual) { [weak self] result in
             guard let self else { return }
-            self.isSwitching = false
             if case .failure(let error) = result {
                 // The privileged half failed, so say so — and still keep the Mac awake,
                 // which is the part that does not need root.
                 self.alert = error.localizedDescription
                 self.runtime.beginHold(second: second, mode: .manual)
             }
+            self.snapshot = self.runtime.snapshot
+            self.isSwitching = false
         }
     }
 

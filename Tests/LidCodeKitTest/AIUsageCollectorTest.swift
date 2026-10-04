@@ -4,6 +4,33 @@ import XCTest
 final class AIUsageCollectorTest: XCTestCase {
     private let now = Date(timeIntervalSince1970: 1_800_000_000)
 
+    func testEmptyDefaultLoginFindsSingleAuthenticatedCustomAccount() {
+        let profile = AIProfile(id: "default-claude", provider: .claude, name: "Claude")
+        let result = AIUsageCollector.resolveClaudeCredential(profile, activeDirectory: nil,
+            customDirectories: ["/tmp/work", "/tmp/unused"]) { candidate in
+                ["claudeAiOauth": ["accessToken": candidate.directory == "/tmp/work" ? "fixture" : ""]]
+            }
+        XCTAssertEqual(result.0.directory, "/tmp/work")
+        XCTAssertEqual(result.0.id, profile.id)
+    }
+
+    func testAmbiguousAccountsRequireActiveAccountAndExplicitProfilesNeverSwitch() {
+        let profile = AIProfile(provider: .claude, name: "Claude")
+        let read: (AIProfile) -> [String: Any]? = { candidate in
+            ["claudeAiOauth": ["accessToken": candidate.directory.isEmpty ? "" : "fixture"]]
+        }
+        let ambiguous = AIUsageCollector.resolveClaudeCredential(profile, activeDirectory: nil,
+            customDirectories: ["/tmp/a", "/tmp/b"], read: read)
+        XCTAssertEqual(ambiguous.0.directory, "")
+        let active = AIUsageCollector.resolveClaudeCredential(profile, activeDirectory: "/tmp/b",
+            customDirectories: ["/tmp/a", "/tmp/b"], read: read)
+        XCTAssertEqual(active.0.directory, "/tmp/b")
+        let explicit = AIProfile(provider: .claude, name: "Work", directory: "/tmp/work")
+        let unchanged = AIUsageCollector.resolveClaudeCredential(explicit, activeDirectory: "/tmp/b",
+            customDirectories: ["/tmp/b"]) { _ in nil }
+        XCTAssertEqual(unchanged.0, explicit)
+    }
+
     func testClaudeMissingWindowDoesNotBecomeZeroUsage() throws {
         let profile = AIProfile(provider: .claude, name: "Work")
         let data = Data(#"{"five_hour":{"utilization":37,"resets_at":"2027-01-15T12:00:00Z"},"seven_day":null}"#.utf8)

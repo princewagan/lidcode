@@ -1,5 +1,6 @@
 import AppKit
 import SwiftUI
+import Combine
 import LidCodeKit
 
 /// The dropdown, as a borderless panel rather than an `NSPopover`.
@@ -30,6 +31,11 @@ final class MenuPanel: NSPanel {
 final class MenuPanelController: NSObject, NSWindowDelegate {
     private let panel: MenuPanel
     private let hosting: NSHostingView<AnyView>
+    private let optionsHosting: NSHostingView<DashboardOptions>
+    private var optionsSink: AnyCancellable?
+    private var screenSink: AnyCancellable?
+    private let optionsPanel: MenuPanel
+    private let model: AppModel
     private let footerHosting: NSHostingView<DashboardFooter>
     private static let footerHeight: CGFloat = 52
     private let scrollView = NSScrollView()
@@ -45,14 +51,9 @@ final class MenuPanelController: NSObject, NSWindowDelegate {
     private static let menuBarGap: CGFloat = 4
     /// Keeps the panel off the very edge of the screen.
     private static let screenInset: CGFloat = 8
-    /// The panel's width, fixed for its whole lifetime.
+    /// Home and settings share the same compact width.
     ///
-    /// Measuring the width from the content instead is what made the panel walk sideways
-    /// every time a disclosure opened: `fittingSize.width` moves by a point or two as rows
-    /// appear, and an item near the right edge is placed by the right-hand clamp in
-    /// `topLeft(for:button:)`, so *any* width change becomes a horizontal jump. Fixing the
-    /// width removes the input to that sum.
-    private static let width: CGFloat = DashboardTheme.width
+    private var width: CGFloat { model.dashboardWidth }
     /// Fallback height when the SwiftUI layout engine has not yet measured the content.
     ///
     /// This used to be a hard `return` that aborted the entire layout pass, leaving the
@@ -75,13 +76,16 @@ final class MenuPanelController: NSObject, NSWindowDelegate {
     var isVisible: Bool { panel.isVisible }
 
     init(rootView: MenuView) {
-        hosting = NSHostingView(rootView: AnyView(rootView.content))
+        let width = rootView.model.dashboardWidth
+        model = rootView.model
+        optionsHosting = NSHostingView(rootView: DashboardOptions(model: rootView.model))
+        hosting = NSHostingView(rootView: AnyView(DashboardContent(model: rootView.model)))
         footerHosting = NSHostingView(rootView: DashboardFooter(model: rootView.model))
-        hosting.frame = NSRect(x: 0, y: 0, width: Self.width, height: Self.defaultHeight)
+        hosting.frame = NSRect(x: 0, y: 0, width: width, height: Self.defaultHeight)
         hosting.autoresizingMask = []
 
         panel = MenuPanel(
-            contentRect: NSRect(x: 0, y: 0, width: Self.width, height: 400),
+            contentRect: NSRect(x: 0, y: 0, width: width, height: 400),
             styleMask: [.borderless, .nonactivatingPanel],
             backing: .buffered,
             defer: false
@@ -97,6 +101,16 @@ final class MenuPanelController: NSObject, NSWindowDelegate {
         // Follows the user across spaces and sits above a full-screen app, which is
         // where an overnight run is most likely to be watched from.
         panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .stationary]
+
+        optionsPanel = MenuPanel(contentRect: NSRect(x: 0, y: 0, width: 230, height: 260),
+                                 styleMask: [.borderless, .nonactivatingPanel], backing: .buffered, defer: false)
+        optionsPanel.isOpaque = false
+        optionsPanel.backgroundColor = .clear
+        optionsPanel.hasShadow = true
+        optionsPanel.level = .popUpMenu
+        optionsPanel.hidesOnDeactivate = false
+        optionsPanel.collectionBehavior = panel.collectionBehavior
+        optionsPanel.contentView = optionsHosting
 
         // The rounded, blurred background the popover used to provide for free.
         let backdrop = NSVisualEffectView()
@@ -133,6 +147,19 @@ final class MenuPanelController: NSObject, NSWindowDelegate {
         ])
         panel.contentView = backdrop
         super.init()
+        optionsSink = model.$isOptionsOpen.receive(on: RunLoop.main).sink { [weak self] open in
+            guard let self else { return }
+            self.layout(anchoredTo: nil, animated: false)
+            self.updateOptionsPanel(open: open)
+        }
+
+        screenSink = model.$screen.dropFirst().receive(on: RunLoop.main).sink { [weak self] _ in
+            DispatchQueue.main.async { [weak self] in
+                guard let self else { return }
+                self.layout(anchoredTo: nil, animated: false)
+                self.hosting.scroll(NSPoint(x: 0, y: self.hosting.isFlipped ? 0 : self.hosting.bounds.height))
+            }
+        }
 
         // Dismiss when the *application* stops being active, not when the panel merely
         // resigns key.
@@ -203,11 +230,11 @@ final class MenuPanelController: NSObject, NSWindowDelegate {
         if !panelIntersectsAnyScreen() {
             let screen = NSScreen.main ?? NSScreen.screens.first
             if let screen {
-                let x = screen.visibleFrame.maxX - Self.width - Self.screenInset
+                let x = screen.visibleFrame.maxX - width - Self.screenInset
                 let y = screen.visibleFrame.maxY - Self.menuBarGap
                 let fallbackFrame = PanelGeometry.frame(
                     topLeft: NSPoint(x: x, y: y),
-                    width: Self.width,
+                    width: width,
                     height: Self.defaultHeight)
                 panel.setFrame(fallbackFrame, display: false)
             }
@@ -232,6 +259,9 @@ final class MenuPanelController: NSObject, NSWindowDelegate {
         // user's next click on the status item.
         guard panel.isVisible else { return }
         removeDismissMonitor()
+        model.isOptionsOpen = false
+        optionsPanel.orderOut(nil)
+        panel.removeChildWindow(optionsPanel)
         closedAt = Date()
         pinnedTopLeft = nil
         panel.orderOut(nil)
@@ -255,9 +285,23 @@ final class MenuPanelController: NSObject, NSWindowDelegate {
     /// pinned position is stale by definition.
     func invalidatePlacement() {
         pinnedTopLeft = nil
-        if panel.isVisible {
-            panel.orderOut(nil)
+        close()
+    }
+
+    private func updateOptionsPanel(open: Bool) {
+        guard open, panel.isVisible else {
+            panel.removeChildWindow(optionsPanel)
+            optionsPanel.orderOut(nil)
+            return
         }
+        optionsHosting.layoutSubtreeIfNeeded()
+        let size = optionsHosting.fittingSize
+        optionsPanel.appearance = panel.appearance
+        optionsPanel.setFrame(NSRect(x: panel.frame.maxX - size.width,
+                                     y: panel.frame.minY - size.height - 6,
+                                     width: size.width, height: size.height), display: true)
+        if optionsPanel.parent == nil { panel.addChildWindow(optionsPanel, ordered: .above) }
+        optionsPanel.orderFront(nil)
     }
 
     private func layout(anchoredTo button: NSStatusBarButton?, animated: Bool) {
@@ -276,9 +320,9 @@ final class MenuPanelController: NSObject, NSWindowDelegate {
         let rawHeight = hosting.fittingSize.height
         let contentHeight = rawHeight > 0 ? ceil(rawHeight) : Self.defaultHeight
         let height = contentHeight + Self.footerHeight
-        hosting.setFrameSize(NSSize(width: Self.width, height: contentHeight))
+        hosting.setFrameSize(NSSize(width: width, height: contentHeight))
 
-        let size = NSSize(width: Self.width, height: height)
+        let size = NSSize(width: width, height: height)
 
         let topLeft: NSPoint
         if let pinnedTopLeft {
@@ -291,16 +335,20 @@ final class MenuPanelController: NSObject, NSWindowDelegate {
 
         let targetScreen = NSScreen.screens.first { $0.frame.contains(topLeft) }
             ?? activeScreen()
+        let popupSpace = model.isOptionsOpen ? ceil(optionsHosting.fittingSize.height) + 6 : 0
         let visibleHeight = targetScreen.map {
             PanelGeometry.visibleHeight(
                 contentHeight: height, topY: topLeft.y,
-                screenMinY: $0.visibleFrame.minY, inset: Self.screenInset)
+                screenMinY: $0.visibleFrame.minY + popupSpace, inset: Self.screenInset)
         } ?? height
         var frame = PanelGeometry.frame(
             topLeft: topLeft, width: size.width, height: visibleHeight)
         frame = clampedToScreen(frame)
 
-        guard frame != panel.frame else { return }
+        guard frame != panel.frame else {
+            updateOptionsPanel(open: model.isOptionsOpen)
+            return
+        }
 
         // Set, never animate.
         //
@@ -313,6 +361,7 @@ final class MenuPanelController: NSObject, NSWindowDelegate {
         // same pass, which is the only way they cannot disagree.
         panel.setFrame(frame, display: true)
         scrollView.reflectScrolledClipView(scrollView.contentView)
+        updateOptionsPanel(open: model.isOptionsOpen)
     }
 
     // MARK: - Placement

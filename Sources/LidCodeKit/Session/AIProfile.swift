@@ -12,6 +12,8 @@ public struct AIProfile: Codable, Identifiable, Equatable, Sendable {
     public var name: String
     /// Empty uses the provider's default credentials and profile directory.
     public var directory: String
+    public var menuBarShow5h: Bool?
+    public var menuBarShow1w: Bool?
     public var isEnabled: Bool
 
     public init(id: String = UUID().uuidString, provider: Provider, name: String, directory: String = "", isEnabled: Bool = true) {
@@ -29,6 +31,48 @@ public struct AIProfile: Codable, Identifiable, Equatable, Sendable {
 }
 
 public enum AIProfileStore {
+    public static func separatingDuplicates(_ profiles: [AIProfile]) -> [AIProfile] {
+        var seen = Set<String>()
+        return profiles.map { profile in
+            var profile = profile
+            let key = profile.provider.rawValue + ":" + URL(fileURLWithPath: profile.expandedDirectory).standardizedFileURL.path
+            if !seen.insert(key).inserted {
+                profile.directory = "~/.lidcode/profiles/\(profile.provider.rawValue)/\(profile.id)"
+            }
+            return profile
+        }
+    }
+
+    public static func columns(for count: Int) -> Int {
+        count == 4 ? 2 : min(3, max(1, count))
+    }
+
+    /// Keep the first default login; additional accounts get independent CLI homes.
+    public static func prepared(_ profile: AIProfile, alongside profiles: [AIProfile]) throws -> AIProfile {
+        var result = profile
+        let others = profiles.filter { $0.id != profile.id && $0.provider == profile.provider }
+        if result.directory.isEmpty && !others.isEmpty {
+            result.directory = "~/.lidcode/profiles/\(profile.provider.rawValue)/\(profile.id)"
+        }
+        guard !others.contains(where: { URL(fileURLWithPath: $0.expandedDirectory).standardizedFileURL ==
+            URL(fileURLWithPath: result.expandedDirectory).standardizedFileURL }) else {
+            throw CocoaError(.fileWriteInvalidFileName)
+        }
+        try FileManager.default.createDirectory(atPath: result.expandedDirectory, withIntermediateDirectories: true,
+                                                attributes: [.posixPermissions: 0o700])
+        return result
+    }
+
+    public static func shellQuote(_ value: String) -> String {
+        "'" + value.replacingOccurrences(of: "'", with: "'\"'\"'") + "'"
+    }
+
+    public static func signInCommand(for profile: AIProfile) -> String {
+        let variable = profile.provider == .claude ? "CLAUDE_CONFIG_DIR" : "CODEX_HOME"
+        let command = profile.provider == .claude ? "claude auth login" : "codex login"
+        return "export \(variable)=\(shellQuote(profile.expandedDirectory)); \(command) && \(profile.provider.rawValue)"
+    }
+
     public static var url: URL {
         FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".lidcode/ai-profiles.json")
     }

@@ -1,6 +1,5 @@
 import Foundation
 import CryptoKit
-import Security
 
 /// Runs inside the downloaded app. Reads existing CLI logins without installing a runtime,
 /// copying credentials, or changing either tool's authentication state.
@@ -10,11 +9,12 @@ public enum AIUsageCollector {
         for profile in profiles where profile.isEnabled {
             var account: ClaudeAccountUsage
             switch profile.provider {
-            case .claude: account = await claude(profile, now: now)
+            case .claude: account = await claude(profile, now: now, allowFallback: profiles.filter { $0.provider == .claude }.count == 1)
             case .codex: account = codex(profile, now: now)
             }
             if account.status == "error" || account.status == "expired",
                var old = previous?.accounts.first(where: { $0.key == profile.id && $0.status == "ok" }),
+               old.storageDir == account.storageDir,
                let asOf = old.asOf, now.timeIntervalSince(asOf) < 6 * 3600 {
                 old.label = profile.name; old.isCarried = true; old.degraded = account.status
                 account = old
@@ -65,39 +65,76 @@ public enum AIUsageCollector {
                            status: status, storageDir: profile.claudeStorageDirectory)
     }
 
-    private static func claude(_ profile: AIProfile, now: Date) async -> ClaudeAccountUsage {
-        // Keychain access stays off the main actor. Never launches a login flow or refreshes tokens.
-        let credential = await Task.detached(priority: .utility) { () -> [String: Any]? in
-            var service = "Claude Code-credentials"
-            if let directory = profile.claudeStorageDirectory {
-                let hash = SHA256.hash(data: Data(directory.precomposedStringWithCanonicalMapping.utf8))
-                    .map { String(format: "%02x", $0) }.joined()
-                service += "-" + hash.prefix(8)
-            }
-            var result: CFTypeRef?
-            let status = SecItemCopyMatching([kSecClass: kSecClassGenericPassword,
-                                             kSecAttrService: service, kSecReturnData: true,
-                                             kSecMatchLimit: kSecMatchLimitOne] as CFDictionary, &result)
-            if status == errSecSuccess, let data = result as? Data,
-               let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any] { return object }
-            // Linux-style credentials are also used by some macOS CLI installations.
-            let url = URL(fileURLWithPath: profile.expandedDirectory).appendingPathComponent(".credentials.json")
-            guard let data = try? Data(contentsOf: url) else { return nil }
-            return try? JSONSerialization.jsonObject(with: data) as? [String: Any]
+    private static func claude(_ profile: AIProfile, now: Date, allowFallback: Bool) async -> ClaudeAccountUsage {
+        // Read through the same bounded Keychain CLI used by the legacy collector.
+        // Default profiles can follow a live custom Claude login when the default is empty.
+        let resolved = await Task.detached(priority: .utility) { () -> (AIProfile, [String: Any]?) in
+            if !allowFallback { return (profile, readClaudeCredential(profile)) }
+            let home = FileManager.default.homeDirectoryForCurrentUser
+            let directories = (try? FileManager.default.contentsOfDirectory(at: home, includingPropertiesForKeys: nil)) ?? []
+            return resolveClaudeCredential(profile, activeDirectory: ActiveClaudeAccountReader.readStorageDir() ?? nil,
+                customDirectories: directories.filter { $0.lastPathComponent.hasPrefix(".claude-") }.map(\.path),
+                read: readClaudeCredential)
         }.value
-        guard let oauth = credential?["claudeAiOauth"] as? [String: Any],
-              let token = oauth["accessToken"] as? String, !token.isEmpty else { return base(profile, status: "signed_out") }
+        let effectiveProfile = resolved.0
+        guard let token = accessToken(resolved.1) else {
+            return base(effectiveProfile, status: resolved.1 == nil ? "signed_out" : "expired")
+        }
         var request = URLRequest(url: URL(string: "https://api.anthropic.com/api/oauth/usage")!)
         request.timeoutInterval = 15
         request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
         request.setValue("oauth-2025-04-20", forHTTPHeaderField: "anthropic-beta")
         do {
             let (data, response) = try await URLSession.shared.data(for: request)
-            guard let response = response as? HTTPURLResponse else { return base(profile, status: "error") }
-            guard response.statusCode == 200 else { return base(profile, status: response.statusCode == 401 ? "expired" : "error") }
-            guard let account = parseClaude(data, profile: profile, now: now) else { return base(profile, status: "error") }
+            guard let response = response as? HTTPURLResponse else { return base(effectiveProfile, status: "error") }
+            guard response.statusCode == 200 else { return base(effectiveProfile, status: response.statusCode == 401 ? "expired" : "error") }
+            guard let account = parseClaude(data, profile: effectiveProfile, now: now) else { return base(effectiveProfile, status: "error") }
             return account
-        } catch { return base(profile, status: "error") }
+        } catch { return base(effectiveProfile, status: "error") }
+    }
+
+    static func resolveClaudeCredential(_ profile: AIProfile, activeDirectory: String?,
+                                       customDirectories: [String], read: (AIProfile) -> [String: Any]?) -> (AIProfile, [String: Any]?) {
+        let original = read(profile)
+        if accessToken(original) != nil || profile.claudeStorageDirectory != nil { return (profile, original) }
+        if let directory = activeDirectory {
+            var active = profile; active.directory = directory
+            let credential = read(active)
+            if accessToken(credential) != nil { return (active, credential) }
+        }
+        // Never guess between multiple authenticated accounts.
+        let candidates = customDirectories.compactMap { directory -> (AIProfile, [String: Any])? in
+            var candidate = profile; candidate.directory = directory
+            guard let credential = read(candidate), accessToken(credential) != nil else { return nil }
+            return (candidate, credential)
+        }
+        if candidates.count == 1 { return candidates[0] }
+        return (profile, original)
+    }
+
+    private static func accessToken(_ credential: [String: Any]?) -> String? {
+        guard let oauth = credential?["claudeAiOauth"] as? [String: Any],
+              let token = oauth["accessToken"] as? String, !token.isEmpty else { return nil }
+        return token
+    }
+
+    private static func readClaudeCredential(_ profile: AIProfile) -> [String: Any]? {
+        var service = "Claude Code-credentials"
+        if let directory = profile.claudeStorageDirectory {
+            let hash = SHA256.hash(data: Data(directory.precomposedStringWithCanonicalMapping.utf8))
+                .map { String(format: "%02x", $0) }.joined()
+            service += "-" + hash.prefix(8)
+        }
+        var keychainCredential: [String: Any]?
+        if let raw = ShellCommand.run("/usr/bin/security", ["find-generic-password", "-s", service, "-w"], timeoutSecond: 5),
+           let object = try? JSONSerialization.jsonObject(with: Data(raw.utf8)) as? [String: Any],
+           !object.isEmpty {
+            keychainCredential = object
+            if accessToken(object) != nil { return object }
+        }
+        let url = URL(fileURLWithPath: profile.expandedDirectory).appendingPathComponent(".credentials.json")
+        guard let data = try? Data(contentsOf: url) else { return keychainCredential }
+        return (try? JSONSerialization.jsonObject(with: data) as? [String: Any]) ?? keychainCredential
     }
 
     public static func parseClaude(_ data: Data, profile: AIProfile, now: Date = Date()) -> ClaudeAccountUsage? {

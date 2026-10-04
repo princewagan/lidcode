@@ -76,13 +76,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // right-click path without patching the button's action.
         item.button?.sendAction(on: [.leftMouseUp, .rightMouseUp])
         statusItem = item
-        applyStatusBar(MenuBarContent(model.snapshot, setting: model.setting))
+        applyStatusBar(MenuBarContent(model.snapshot, setting: model.setting, profiles: model.profiles))
 
         // The composite icon changes whenever the snapshot or setting changes.
         // `.removeDuplicates(by:)` still prevents redundant redraws.
+        let themeChanges = NotificationCenter.default.publisher(for: .lidCodeThemeDidChange)
+            .map { _ in () }
+            .prepend(())
         iconSink = model.$snapshot
-            .combineLatest(model.$setting)
-            .map { (snapshot, setting) in MenuBarContent(snapshot, setting: setting) }
+            .combineLatest(model.$setting, model.$profiles)
+            .combineLatest(themeChanges)
+            .map { state, _ in MenuBarContent(state.0, setting: state.1, profiles: state.2) }
             .removeDuplicates(by: { $0 == $1 })
             .sink { [weak self] content in
                 DispatchQueue.main.async { self?.applyStatusBar(content) }
@@ -92,8 +96,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// Everything the menu bar draws, kept as one Equatable value so `removeDuplicates`
     /// covers the whole picture rather than just the glyph.
     struct MenuBarContent: Equatable {
+        struct Metric: Equatable {
+            var text: String
+            var label: String
+            var remaining: Double
+            var themeName: String
+        }
         var icon: Icon
-        var percentText: String?       // e.g. "14%" or nil
+        var metricTexts: [Metric]
         var activeBadge: Int?          // nil = hidden
         var blockedBadge: Int?
         var errorBadge: Int?
@@ -107,39 +117,30 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         var showAlertIcon: Bool
 
         enum WarningKind: Equatable {
-            case tempNonBlocking    // orange thermometer
-            case tempBlocking       // red thermometer
-            case batteryBlocking    // red battery
-            case memoryWarn         // orange chip
-            case memoryCritical     // red chip
+            case hot
+            case veryHot
         }
 
-        init(_ snapshot: RuntimeSnapshot, setting: Setting) {
+        init(_ snapshot: RuntimeSnapshot, setting: Setting, profiles: [AIProfile]) {
             icon = Icon(snapshot)
 
-            // Utilization percent (C5, C6)
-            //
-            // Shows the five-hour utilization of whichever account is currently in use.
-            // "Newest process wins": a user switching accounts leaves old sessions from the
-            // previous account alive, so "any ADVO process → ADVO is active" is wrong.
-            // The newest `claude` process carries the correct environment.
-            //
-            // Fallback chain:
-            //   1. Active account resolved and it is "ok" → its five-hour utilization.
-            //   2. Active account unknown, not "ok", or no per-account data →
-            //      the top-level summary window (back-compat, preserves old behaviour).
-            if let usage = snapshot.usage {
-                let detected: String?? = ActiveClaudeAccountReader.readStorageDir()
-                let readable = usage.accounts.filter { $0.status == "ok" && $0.fiveHour != nil }
-                let activeClaude = detected.flatMap { directory in
-                    readable.first { $0.provider == "claude" && $0.storageDir == directory }
-                }
-                let account = activeClaude ?? readable.first { $0.provider == "codex" && $0.isActive } ?? readable.first
-                if let account, let window = account.fiveHour,
-                   account.asOf.map({ Date().timeIntervalSince($0) <= ClaudeUsageReader.staleAfterSecond }) ?? !usage.isStale {
-                    percentText = "\(Int(window.utilization.rounded()))%"
-                } else { percentText = nil }
-            } else { percentText = nil }
+            // Selected usage metrics follow the same remaining-percent convention as the dashboard.
+            let usage = snapshot.usage
+            let readable = usage?.accounts.filter { $0.status == "ok" } ?? []
+            func metric(_ enabled: Bool, _ account: ClaudeAccountUsage?, _ keyPath: KeyPath<ClaudeAccountUsage, UsageWindow?>) -> Metric? {
+                guard enabled, let currentUsage = usage, let account,
+                      account.asOf.map({ Date().timeIntervalSince($0) <= ClaudeUsageReader.staleAfterSecond }) ?? !currentUsage.isStale,
+                      let window = account[keyPath: keyPath] else { return nil }
+                let remaining = min(100, max(0, 100 - window.utilization))
+                let themeName = UserDefaults.standard.string(forKey: "appTheme") ?? AppTheme.blue.rawValue
+                return Metric(text: "\(Int(remaining.rounded()))%", label: "\(account.label) \(keyPath == \.fiveHour ? "5h" : "1w")", remaining: remaining, themeName: themeName)
+            }
+            metricTexts = profiles.filter(\.isEnabled).flatMap { profile in
+                let account = readable.first { $0.key == profile.id }
+                let claude = profile.provider == .claude
+                return [metric(profile.menuBarShow5h ?? (claude ? setting.menuBarShowClaude5h : setting.menuBarShowCodex5h), account, \.fiveHour),
+                        metric(profile.menuBarShow1w ?? (claude ? setting.menuBarShowClaude1w : setting.menuBarShowCodex1w), account, \.sevenDay)].compactMap { $0 }
+            }
 
             // Session count badges (C7-C10)
             let sessions = snapshot.agentSession.sessions
@@ -153,40 +154,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
             // Warning slot (H1-H4) — exactly one slot
             let thermal = snapshot.thermal
-            let isBlocked = snapshot.blockedBy != nil
-            if isBlocked {
-                // Determine whether blocked by thermal or battery
-                if case .thermalCritical = snapshot.blockedBy {
-                    warningKind = .tempBlocking
-                } else if case .batteryFloor = snapshot.blockedBy {
-                    warningKind = .batteryBlocking
-                } else {
-                    warningKind = .tempBlocking   // fallback
-                }
-            } else if thermal.level >= .serious {
-                warningKind = .tempNonBlocking
-            } else if setting.isMemoryWarningOn,
-                      let mem = snapshot.memory,
-                      case let level = mem.displayLevel(
-                          warnSwapPercent: setting.memoryWarnSwapPercent,
-                          criticalSwapPercent: setting.memoryCriticalSwapPercent),
-                      level > .normal {
-                // Ranked below heat and battery on purpose. Those two can end a hold and
-                // cost you the run; memory only makes the machine slow. When the Mac is
-                // both hot and swapping, the reason it might stop is the one worth the
-                // single warning slot.
-                warningKind = level >= .critical ? .memoryCritical : .memoryWarn
+            if thermal.level >= .serious {
+                warningKind = thermal.level == .critical ? .veryHot : .hot
             } else {
                 warningKind = nil
             }
 
             // Visibility toggles (I1, I2)
-            showStateIcon = setting.menuBarShowStateIcon
-            showActiveBadge = setting.menuBarShowActiveBadge
-            showBlockedBadge = setting.menuBarShowBlockedBadge
-            showErrorBadge = setting.menuBarShowErrorBadge
-            showTempWarnIcon = setting.menuBarShowTempWarnIcon
-            showAlertIcon = setting.menuBarShowAlertIcon
+            showStateIcon = false
+            showActiveBadge = false
+            showBlockedBadge = false
+            showErrorBadge = false
+            showTempWarnIcon = true
+            showAlertIcon = false
         }
     }
 
@@ -238,17 +218,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         // Determine which elements are visible
         let showIcon = content.showStateIcon
-        let showPct = content.percentText != nil
+        let showPct = !content.metricTexts.isEmpty
         let showActive = content.showActiveBadge && content.activeBadge != nil
         let showBlocked = content.showBlockedBadge && content.blockedBadge != nil
         let showError = content.showErrorBadge && content.errorBadge != nil
-        let warnKind: MenuBarContent.WarningKind?
-        if let w = content.warningKind {
-            let show = (w == .tempNonBlocking) ? content.showTempWarnIcon : content.showAlertIcon
-            warnKind = show ? w : nil
-        } else {
-            warnKind = nil
-        }
+        let warnKind = content.warningKind
 
         /// Render an SF Symbol tinted, and report the size it should actually be drawn at.
         ///
@@ -283,22 +257,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             : nil
         let warnSymbol: (image: NSImage, size: NSSize)? = {
             guard let warn = warnKind else { return nil }
-            switch warn {
-            case .tempNonBlocking: return symbol("thermometer.medium", color: .systemOrange)
-            case .tempBlocking:    return symbol("thermometer.medium", color: .systemRed)
-            case .batteryBlocking: return symbol("battery.25", color: .systemRed)
-            case .memoryWarn:      return symbol("memorychip.fill", color: .systemOrange)
-            case .memoryCritical:  return symbol("memorychip.fill", color: .systemRed)
-            }
+            return symbol("exclamationmark.triangle.fill",
+                          color: warn == .veryHot ? .systemRed : .systemOrange)
         }()
 
         // ── Measure total width ───────────────────────────────────────────────────
         var width: CGFloat = 4  // leading padding
         if let stateSymbol { width += stateSymbol.size.width + gap }
         if showPct {
-            let pctStr = content.percentText!
-            let pctW = (pctStr as NSString).size(withAttributes: [.font: pctFont]).width
-            width += pctW + gap
+            let metricsWidth = content.metricTexts.reduce(CGFloat.zero) {
+                $0 + 12 + 2 + ($1.text as NSString).size(withAttributes: [.font: pctFont]).width
+            } + CGFloat(max(0, content.metricTexts.count - 1)) * gap
+            width += metricsWidth + gap
         }
         if showActive { width += badgeDiam + gap }
         if showBlocked { width += badgeDiam + gap }
@@ -334,15 +304,30 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         if let stateSymbol { draw(stateSymbol) }
 
         // Percent text
-        if showPct, let pctStr = content.percentText {
-            let attrs: [NSAttributedString.Key: Any] = [
-                .font: pctFont,
-                .foregroundColor: NSColor.labelColor
-            ]
-            let size = (pctStr as NSString).size(withAttributes: attrs)
-            let y = (barH - size.height) / 2
-            (pctStr as NSString).draw(at: NSPoint(x: x, y: y), withAttributes: attrs)
-            x += size.width + gap
+        if showPct {
+            let attrs: [NSAttributedString.Key: Any] = [.font: pctFont, .foregroundColor: NSColor.labelColor]
+            for (index, metric) in content.metricTexts.enumerated() {
+                if index > 0 { x += gap }
+                let ringRect = NSRect(x: x, y: (barH - 12) / 2, width: 12, height: 12)
+                let ringWidth: CGFloat = 2.5
+                let ringRadius = (ringRect.width - ringWidth) / 2
+                let ring = NSBezierPath(ovalIn: ringRect.insetBy(dx: ringWidth / 2, dy: ringWidth / 2))
+                ring.lineWidth = ringWidth
+                NSColor.tertiaryLabelColor.withAlphaComponent(0.25).setStroke()
+                ring.stroke()
+                let color = NSColor(AppTheme(rawValue: metric.themeName)?.color ?? AppTheme.blue.color)
+                let progress = NSBezierPath()
+                progress.lineWidth = ringWidth
+                progress.lineCapStyle = .round
+                progress.appendArc(withCenter: NSPoint(x: ringRect.midX, y: ringRect.midY), radius: ringRadius,
+                                   startAngle: 90, endAngle: 90 - 360 * metric.remaining / 100, clockwise: true)
+                color.setStroke()
+                progress.stroke()
+                x += 15
+                let size = (metric.text as NSString).size(withAttributes: attrs)
+                (metric.text as NSString).draw(at: NSPoint(x: x, y: (barH - size.height) / 2), withAttributes: attrs)
+                x += size.width + gap
+            }
         }
 
         // Helper: draw a coloured circle badge with a number
@@ -387,6 +372,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         img.unlockFocus()
 
         button.image = img
+        var labels = content.metricTexts.map { "\($0.label): \($0.text) left" }
+        if let warning = content.warningKind {
+            labels.append(warning == .veryHot ? "Very hot — check airflow" : "Hot — check airflow")
+        }
+        button.toolTip = labels.joined(separator: "\n")
+        button.setAccessibilityLabel(labels.isEmpty ? "Lidcode" : button.toolTip)
         button.title = ""
         button.imagePosition = .imageOnly
     }
@@ -453,9 +444,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         openItem.target = self
         menu.addItem(openItem)
 
-        // "Force Restart" — re-runs the wake recovery routine. Useful when the app
-        // has gone stale (sensors frozen, helper disconnected) without a full sleep
-        // cycle to trigger the automatic recovery.
+        // Relaunch the entire app, including runtime, sensors, and panel state.
         let restartItem = NSMenuItem(
             title: "Force Restart",
             action: #selector(forceRestart),
@@ -484,7 +473,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     @objc private func forceRestart() {
-        wakeUp()
+        restartApp()
+    }
+
+    /// A separate launcher waits for this PID to exit before starting a fresh app.
+    func restartApp() {
+        let launcher = Process()
+        launcher.executableURL = URL(fileURLWithPath: "/bin/sh")
+        let bundled = Bundle.main.bundleURL.pathExtension == "app"
+        guard let executable = Bundle.main.executableURL else { return }
+        launcher.arguments = ["-c", "while kill -0 \"$1\" 2>/dev/null; do sleep 0.1; done; if [ \"$3\" = app ]; then exec /usr/bin/open -n \"$2\"; else exec \"$2\"; fi",
+                              "lidcode-relaunch", String(ProcessInfo.processInfo.processIdentifier),
+                              bundled ? Bundle.main.bundleURL.path : executable.path,
+                              bundled ? "app" : "executable"]
+        do { try launcher.run() }
+        catch { NSSound.beep(); return }
+        quitApp()
     }
 
     @objc private func quitApp() {
@@ -605,7 +609,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         // 2. Re-create the status item image. The menu bar can be rebuilt after a
         //    display event, and the icon needs to be re-stamped to remain visible.
-        applyStatusBar(MenuBarContent(model.snapshot, setting: model.setting))
+        applyStatusBar(MenuBarContent(model.snapshot, setting: model.setting, profiles: model.profiles))
 
         // 3. Force a health refresh so the panel reflects current state rather than
         //    pre-sleep readings. This also pokes the runtime's observable so the icon

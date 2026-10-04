@@ -1,9 +1,10 @@
 import AppKit
 import SwiftUI
+import LidCodeKit
 
 /// How long a hold runs, as a continuous track rather than a list of preset buttons.
 ///
-/// Snapped to 30 minutes, with a maximum of 6 hours (J6) so the intervals are well-spaced.
+/// Snapped to 30 minutes, with a maximum of 3 hours (J6) so the intervals are well-spaced.
 ///
 /// # Why the knob used to jump, and what each fix addresses
 ///
@@ -31,17 +32,22 @@ import SwiftUI
 /// The knob tracks the pointer 1:1 during a drag with no animation. Everything else — a
 /// release settling onto its step, a value changed from elsewhere — eases over 0.14s.
 struct DurationSlider: View {
+    @AppStorage("appTheme") private var themeName = AppTheme.blue.rawValue
+    private var theme: AppTheme { AppTheme(rawValue: themeName) ?? .blue }
+
     /// The committed value, in seconds. Read from the model; updated only on drag end.
     var second: Int
+    var isEnabled: Bool = false
     /// Called on release only — never mid-drag (no per-frame disk writes or model updates).
     var onCommit: (Int) -> Void
     /// Raised while a drag is in flight so the containing panel can stop re-laying itself
     /// out underneath the pointer. Optional so the view stays usable on its own.
     var onInteracting: (Bool) -> Void = { _ in }
 
-    static let minimumSecond = 30 * 60
-    /// Max is 6h (J6), down from 8h, so the 30-minute steps are more spaced.
-    static let maximumSecond = 6 * 3600
+    static let minimumSecond = 0
+    static let activeMinimumSecond = 30 * 60
+    /// Max is 3h (J6), down from 8h, so the 30-minute steps are more spaced.
+    static let maximumSecond = Setting.maxSessionSecond
     static let stepSecond = 30 * 60
     static var stepCount: Int { (maximumSecond - minimumSecond) / stepSecond }
 
@@ -82,9 +88,9 @@ struct DurationSlider: View {
             track
 
             HStack {
-                Text("30m").font(.system(size: 9)).foregroundStyle(.tertiary)
+                Text("0m").font(.system(size: 9)).foregroundStyle(.tertiary)
                 Spacer()
-                Text("6h").font(.system(size: 9)).foregroundStyle(.tertiary)
+                Text("3h").font(.system(size: 9)).foregroundStyle(.tertiary)
             }
         }
     }
@@ -101,7 +107,7 @@ struct DurationSlider: View {
 
                 // Filled to the centre of the knob.
                 Capsule(style: .continuous)
-                    .fill(Palette.brand)
+                    .fill(theme.color)
                     .frame(width: knobX + knobDiameter)
 
                 tickRow(travel: travel)
@@ -143,7 +149,8 @@ struct DurationSlider: View {
                         }
                         let target = value.location.x - (grabOffset ?? 0)
                         let raw = (target - Self.knobInset - (knobDiameter / 2)) / travel
-                        let clamped = min(1, max(0, raw))
+                        let minimumFraction = isEnabled ? Self.fraction(forSecond: Self.activeMinimumSecond) : 0
+                        let clamped = min(1, max(minimumFraction, raw))
                         // Local drag state owns the thumb — the model is not touched here.
                         dragFraction = clamped
                         tick(for: Self.step(forFraction: clamped))

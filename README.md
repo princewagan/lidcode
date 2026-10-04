@@ -19,8 +19,13 @@ No Python, Swift toolchain, or source checkout is needed to use the download.
 
 Open **Options → Customize** to add Claude or Codex, name a profile, or choose a
 custom CLI profile folder. Default installed profiles are detected on first launch.
-Sign in through the corresponding CLI; Lidcode reads your existing login and keeps
-credentials on your Mac. Session and weekly meters show **left** or **used**, with
+Adding another account creates a separate CLI profile folder and opens sign-in in
+Terminal. Choose the intended account in the browser; use **Sign In** to reconnect
+an existing profile. Lidcode keeps credentials on your Mac. Accounts previously
+sharing a folder are separated automatically; the first keeps its existing login.
+Each account has its own 5h and 1w switches under **Menu bar usage**. Usage cards
+have at most three columns: four accounts use 2×2, five use 3×2, and additional
+accounts add rows. Session and weekly meters show **left** or **used**, with
 reset countdowns, outdated-reading labels, and explicit unavailable states.
 
 Claude uses its usage endpoint; Codex uses local CLI session logs. Usage refreshes
@@ -169,6 +174,16 @@ Both halves matter separately. An agent working against a down API is a run burn
 Idle agents are listed but **not probed**: listing them keeps the panel honest about what LidCode understands, so an agent missing from the list is a visible gap rather than a silent one — while probing only what is working keeps a power utility from firing six requests every thirty seconds. An unprobed agent shows a hollow dot and "not checked", never a green one.
 
 ### Settings
+
+The **Active** list reads Claude and Codex session files from the current user's CLI
+homes, including custom account directories added in Customize. It works across
+terminals without requiring Warp. Completed turns disappear from Active, and silent
+activity expires after ten minutes. Discovery can take up to 30 seconds for a new session.
+
+In **Settings → Agent activity**, **Connect to local Warp** optionally adds Warp's
+local activity events and tab titles. It needs no Warp login and can be switched off
+without disabling native Claude/Codex detection. Warp events are used when available;
+the same session is counted once across both sources.
 
 Every threshold that governs a run is editable in the panel — both battery floors, the thermal ceiling, the idle-release window, charging-only, auto-watch, and network probing. These were `lidcode set`-only, which put the numbers deciding whether an overnight run survives behind a command you have to remember. The panel already *draws* the floors (the battery ring turns amber at the soft one), so it should be able to move them.
 

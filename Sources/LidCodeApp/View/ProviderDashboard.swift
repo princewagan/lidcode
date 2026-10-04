@@ -7,8 +7,8 @@ enum DashboardTheme {
     static let width: CGFloat = 320
     static let tray = Color(nsColor: .textBackgroundColor)
     static let cardRadius: CGFloat = 12
-    static func meter(_ percent: Double) -> Color {
-        percent >= 90 ? Color(nsColor: .systemRed) : percent >= 70 ? Color(nsColor: .systemYellow) : Color(nsColor: .systemBlue)
+    static func meter(_ percent: Double, accent: Color) -> Color {
+        percent >= 90 ? Color(nsColor: .systemRed) : percent >= 70 ? Color(nsColor: .systemYellow) : accent
     }
 }
 
@@ -37,10 +37,17 @@ struct ProviderDashboard: View {
                         .buttonStyle(.borderedProminent)
                 }.padding(14).frame(maxWidth: .infinity, alignment: .leading).dashboardCard()
             } else {
-                ForEach(model.profiles.filter(\.isEnabled)) { profile in
-                    let account = model.snapshot.usage?.accounts.first { $0.key == profile.id }
-                    AIProviderCard(profile: profile, account: account, refreshing: model.isRefreshingUsage,
-                                   showLeft: $showLeft, absoluteReset: $absoluteReset)
+                LazyVGrid(columns: [GridItem(.flexible(), alignment: .top)], alignment: .leading, spacing: 14) {
+                    ForEach(model.profiles.filter(\.isEnabled)) { profile in
+                        let account = model.snapshot.usage?.accounts.first { $0.key == profile.id }
+                        VStack(alignment: .leading) {
+                            AIProviderCard(profile: profile, account: account, refreshing: model.isRefreshingUsage,
+                                           showLeft: $showLeft, absoluteReset: $absoluteReset)
+                            if account?.status != "ok" {
+                                Button("Sign In") { model.signIn(profile) }.buttonStyle(.bordered)
+                            }
+                        }
+                    }
                 }
             }
         }
@@ -48,6 +55,9 @@ struct ProviderDashboard: View {
 }
 
 struct AIProviderCard: View {
+    @AppStorage("appTheme") private var themeName = AppTheme.blue.rawValue
+    private var theme: AppTheme { AppTheme(rawValue: themeName) ?? .blue }
+
     let profile: AIProfile
     let account: ClaudeAccountUsage?
     var refreshing = false
@@ -68,9 +78,6 @@ struct AIProviderCard: View {
                         .help(account.asOf.map { "Last read \($0.formatted())" } ?? "Last read time unknown")
                 }
                 Spacer(minLength: 0)
-                if account?.isActive == true {
-                    Circle().fill(Color(nsColor: .systemGreen)).frame(width: 5, height: 5).help("Active profile")
-                }
             }.padding(.horizontal, 2).padding(.vertical, 2)
             VStack(spacing: 0) {
                 if let account, account.status == "ok" {
@@ -107,7 +114,7 @@ struct AIProviderCard: View {
                 Capsule().fill(Color.primary.opacity(0.10))
                     .overlay(alignment: .leading) {
                         if let window {
-                            Capsule().fill(DashboardTheme.meter(window.utilization))
+                            Capsule().fill(DashboardTheme.meter(window.utilization, accent: theme.color))
                                 .frame(width: geometry.size.width * (showLeft ? 1 - window.fraction : window.fraction))
                         }
                     }

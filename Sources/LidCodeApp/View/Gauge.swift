@@ -19,11 +19,11 @@ enum Palette {
         }
     }
 
-    static func color(for level: ThermalLevel) -> Color {
+    static func color(for level: ThermalLevel, accent: Color = brand) -> Color {
         switch level {
-        case .nominal:  return brandSoft
-        case .fair:     return brandSoft
-        case .serious:  return brand
+        case .nominal:  return accent.opacity(0.65)
+        case .fair:     return accent.opacity(0.65)
+        case .serious:  return Color(nsColor: .systemOrange)
         case .critical: return brandDeep
         }
     }
@@ -42,12 +42,12 @@ enum Palette {
 
     /// Battery colour tracks the floors, not an arbitrary 20/50 split — the bar deepens
     /// exactly when the soft floor is the next thing that will happen.
-    static func batteryColor(percent: Int?, setting soft: Int, hard: Int, isOnMain: Bool) -> Color {
+    static func batteryColor(percent: Int?, setting soft: Int, hard: Int, isOnMain: Bool, accent: Color = brand) -> Color {
         guard let percent else { return unknown }
-        if isOnMain { return brandSoft }
+        if isOnMain { return accent.opacity(0.65) }
         if percent <= hard { return brandDeep }
-        if percent <= soft { return brand }
-        return brandSoft
+        if percent <= soft { return accent }
+        return accent.opacity(0.65)
     }
 }
 

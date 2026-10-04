@@ -27,6 +27,9 @@ import LidCodeKit
 ///   3. DISABLED → press → back to BLOCKED (guard still present)
 /// Warning texts are independent — they always reflect real hardware, not button state.
 struct PowerButton: View {
+    @AppStorage("appTheme") private var themeName = AppTheme.blue.rawValue
+    private var theme: AppTheme { AppTheme(rawValue: themeName) ?? .blue }
+
     var isEnabled: Bool
     var isSwitching: Bool
     var isProtected: Bool
@@ -38,22 +41,13 @@ struct PowerButton: View {
 
     var body: some View {
         Button {
+            guard !isSwitching else { return }
             onToggle(!isEnabled)
         } label: {
             HStack(spacing: 10) {
-                ZStack {
-                    if isSwitching {
-                        ProgressView()
-                            .controlSize(.small)
-                            .tint(isEnabled ? .white : .secondary)
-                    } else {
-                        Image(systemName: symbolName)
-                            .font(.system(size: 13, weight: .semibold))
-                    }
-                }
-                // Fixed, because a spinner and an SF Symbol do not measure alike and the
-                // swap happens mid-click — the one moment the button must not move.
-                .frame(width: 22, height: 22)
+                Image(systemName: symbolName)
+                    .font(.system(size: 13, weight: .semibold))
+                    .frame(width: 22, height: 22)
 
                 Text(line)
                     .font(.system(size: 13, weight: .semibold))
@@ -81,21 +75,24 @@ struct PowerButton: View {
                 RoundedRectangle(cornerRadius: 11, style: .continuous)
                     .fill(buttonBackground)
             )
+            .overlay {
+                if !isEnabled {
+                    RoundedRectangle(cornerRadius: 11, style: .continuous)
+                        .strokeBorder(theme.color.opacity(0.22), lineWidth: 1)
+                }
+            }
             .contentShape(Rectangle())
             .animation(.easeOut(duration: 0.15), value: isGuardBlocked)
             .animation(.easeOut(duration: 0.15), value: isGuardOverride)
             .animation(.easeOut(duration: 0.15), value: isEnabled)
         }
         .buttonStyle(.plain)
-        .disabled(isSwitching)
         .help(helpText)
     }
 
-    private var line: String {
+    var line: String {
         if !isEnabled { return "OFF" }
-        if isGuardBlocked { return "ON · guard blocking" }
-        if isGuardOverride { return "ON · guard overridden" }
-        return isProtected ? "ON · lid can close" : "ON · lid must stay open"
+        return isProtected ? "ON · lid can close" : "ON"
     }
 
     private var pillLabel: String {
@@ -120,7 +117,7 @@ struct PowerButton: View {
     }
 
     private var pillBackground: AnyShapeStyle {
-        if isGuardBlocked { return AnyShapeStyle(Palette.brandDeep.opacity(0.4)) }
+        if isGuardBlocked { return AnyShapeStyle(Color(nsColor: .systemRed).opacity(0.4)) }
         if isGuardOverride { return AnyShapeStyle(Color.white.opacity(0.28)) }
         if isEnabled { return AnyShapeStyle(Color.white.opacity(0.24)) }
         return AnyShapeStyle(Color.primary.opacity(0.09))
@@ -128,18 +125,18 @@ struct PowerButton: View {
 
     private var buttonBackground: AnyShapeStyle {
         if !isEnabled {
-            return AnyShapeStyle(Color.primary.opacity(0.07))
+        return AnyShapeStyle(theme.color.opacity(0.09))
         }
         if isGuardBlocked {
             // Desaturated/faded gradient — guard is blocking (F1)
             return AnyShapeStyle(LinearGradient(
-                colors: [Palette.brand.opacity(0.5), Palette.brandDeep.opacity(0.5)],
+                colors: [theme.color.opacity(0.5), Color(nsColor: .systemRed).opacity(0.5)],
                 startPoint: .topLeading,
                 endPoint: .bottomTrailing))
         }
         // Normal ON or OVERRIDE — full colour (F2)
         return AnyShapeStyle(LinearGradient(
-            colors: [Palette.brand, Palette.brandDeep],
+            colors: [theme.color, theme.color.opacity(0.8)],
             startPoint: .topLeading,
             endPoint: .bottomTrailing))
     }
@@ -170,6 +167,9 @@ struct PowerButton: View {
 /// state has to name what is now unguarded, because two waivable rules that both read
 /// "Override" is a state you cannot recover from without clicking one to find out.
 struct GuardToggle: View {
+    @AppStorage("appTheme") private var themeName = AppTheme.blue.rawValue
+    private var theme: AppTheme { AppTheme(rawValue: themeName) ?? .blue }
+
     var isOn: Bool
     var onLabel: String
     var offLabel: String
@@ -188,7 +188,7 @@ struct GuardToggle: View {
                         // Waived is the deeper orange: a guard you have turned off is the
                         // condition most likely to end the run, so it sits at the danger
                         // end of the family rather than switching hue to say so.
-                        .foregroundStyle(isOn ? Palette.brandSoft : Palette.brandDeep)
+                        .foregroundStyle(isOn ? theme.color.opacity(0.65) : Color(nsColor: .systemRed))
                     Spacer(minLength: 0)
                     // The word, not a coloured dot.
                     //
@@ -206,7 +206,7 @@ struct GuardToggle: View {
                         .background(
                             Capsule().fill(isOn
                                            ? Color.primary.opacity(0.10)
-                                           : Palette.brandDeep))
+                                           : Color(nsColor: .systemRed)))
                 }
                 Text(isOn ? onLabel : offLabel)
                     .font(.system(size: 10, weight: .medium))
@@ -224,8 +224,12 @@ struct GuardToggle: View {
             .frame(maxWidth: .infinity, alignment: .leading)
             .background(
                 RoundedRectangle(cornerRadius: 9, style: .continuous)
-                    .fill(isOn ? Color.primary.opacity(0.06) : Palette.brandDeep.opacity(0.13))
+                    .fill(isOn ? theme.color.opacity(0.09) : Color(nsColor: .systemRed).opacity(0.13))
             )
+            .overlay {
+                RoundedRectangle(cornerRadius: 9, style: .continuous)
+                    .strokeBorder(isOn ? theme.color.opacity(0.20) : Color.clear, lineWidth: 0.8)
+            }
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
