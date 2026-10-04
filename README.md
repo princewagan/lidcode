@@ -2,7 +2,33 @@
   <img src="Asset/banner.png" alt="LidCode — closed-lid keep-awake for macOS" width="100%">
 </p>
 
-# LidCode
+# Lidcode
+
+Track your Claude and Codex limits and keep your Mac awake while your AI works.
+Lidcode uses OpenUsage 0.7.13's native provider-card layout, with configurable AI
+profiles and Lidcode's guarded keep-awake controls.
+
+**[Download Lidcode for Mac](https://github.com/princewagan/lidcode/releases/latest)** · **[Setup guide](docs/INSTALL.md)**
+
+Requires macOS 14+ on Apple silicon. Open the DMG, drag the app to Applications,
+then open it. The public build is not notarized; see the setup guide if macOS
+blocks the first launch. The app includes the CLI and optional closed-lid helper.
+No Python, Swift toolchain, or source checkout is needed to use the download.
+
+### Your AI accounts
+
+Open **Options → Customize** to add Claude or Codex, name a profile, or choose a
+custom CLI profile folder. Default installed profiles are detected on first launch.
+Sign in through the corresponding CLI; Lidcode reads your existing login and keeps
+credentials on your Mac. Session and weekly meters show **left** or **used**, with
+reset countdowns, outdated-reading labels, and explicit unavailable states.
+
+Claude uses its usage endpoint; Codex uses local CLI session logs. Usage refreshes
+natively every five minutes and with **⌘R**. Other AI tools can still use Lidcode's
+process watching and CLI work leases; this release's usage cards support Claude
+and Codex. AI profile configuration is stored in `~/.lidcode/ai-profiles.json`.
+
+<img src="docs/screenshots/dashboard-dark.png" alt="Lidcode provider dashboard with Claude, Codex and keep-awake controls" width="320">
 
 ### Your agent is still working. You want to close the lid and go to bed.
 
@@ -187,43 +213,27 @@ Adding an agent is one entry in `ServiceEndpoint.known` — a label, a URL, and 
 
 ## Install
 
-Grab the latest zip from [Releases](https://github.com/bygelo/lidcode/releases),
-drag `LidCode.app` to `/Applications`, then:
-
-```sh
-xattr -dr com.apple.quarantine /Applications/LidCode.app
-open /Applications/LidCode.app
-
-# the CLI ships inside the bundle
-ln -sf /Applications/LidCode.app/Contents/Helpers/lidcode ~/.local/bin/lidcode
-```
-
-That first command is not optional. Releases are **ad-hoc signed, not
-notarised** — notarising needs a paid Apple Developer account — so Gatekeeper
-refuses to launch the app until the quarantine flag is cleared. For the same
-reason the signature changes on every release, and macOS treats each update as
-a new app.
-
-Requires macOS 14+ on Apple silicon.
+Download the DMG from [Releases](https://github.com/princewagan/lidcode/releases/latest)
+and drag `LidCode.app` to `/Applications`. See the [setup guide](docs/INSTALL.md)
+for first-launch approval, AI profiles, the optional CLI and helper, updates and removal.
 
 ### From source
 
 ```bash
-./Script/install-cli.sh        # lidcode → ~/.local/bin (no sudo; --system for /usr/local/bin)
-./Script/build-app.sh          # → dist/LidCode.app
+swift test
+./Script/build-app.sh                 # → dist/LidCode.app
+./Script/package-release.sh           # → DMG, ZIP and SHA256SUMS.txt
+./Script/install-cli.sh               # optional CLI → ~/.local/bin
 ```
 
-Building with a Developer ID signing identity avoids the quarantine dance —
-`build-app.sh` picks up the first codesigning identity on the machine and falls
-back to ad-hoc, so `SIGN="Some Identity" ./Script/build-app.sh` overrides it.
+A Swift 6 toolchain and macOS SDK are required to build. `SIGN` can select a
+codesigning identity by its SHA-1; use `SIGN=-` for an ad-hoc build. Signing alone
+does not notarize the app.
 
-The helper is **not** a separate step any more. `build-app.sh` bundles it into the app, and the menu's Closed-lid row offers an **Install…** button that asks for your password once. `./Script/install-helper.sh` still exists for a CLI-only install, and does the same thing from a Terminal.
-
-Until it is installed, the Closed-lid switch is not shown at all — the row states the prerequisite and offers to satisfy it. Offering a control that cannot work and then answering the click with the name of a shell script is not an error message, it is a dead end.
-
-Keep-awake, timers, charging-only, both battery floors and thermal watch all work **without** the helper. The helper is required only to close the lid.
-
-Uninstall: `./Script/uninstall-helper.sh` — unloads the daemon and asserts `disablesleep 0` regardless of how it exited.
+The helper is bundled. The panel offers **Install…** when it is needed and asks
+for your macOS password once. Keep-awake, timers and safety guards work without
+the helper; closed-lid protection needs it. Uninstall the helper with
+`./Script/uninstall-helper.sh`.
 
 ### Verify the safety claim before trusting it
 
@@ -251,8 +261,14 @@ lidcode setting                    show thresholds
 lidcode set --soft-battery 25 --idle-release 5m --charging-only on
 lidcode set --network-probe off    stop probing DNS and agent APIs
 lidcode hook install [--project]   hold the Mac only while Claude Code works
+lidcode codex <profile> [args]     start a configured Codex profile
+lidcode codex --list               list profile names and ids
 lidcode doctor                     check the install, find a stuck disablesleep
 ```
+
+`lidcode codex Work` starts the Codex profile named Work in **Options → Customize**.
+Use `lidcode codex --list` to list names and ids; use the id if names repeat.
+Each process gets its own `CODEX_HOME`, so other open sessions retain their account.
 
 `smart` (default) releases ~10 min after the last lease disappears. `manual` holds for the full window.
 
@@ -286,3 +302,11 @@ changes the tint.
 Watchdog rules, webhooks, alert routing, weekly reports, Homebrew tap, notarised DMG.
 
 [MIT](LICENSE).
+
+## UI attribution
+
+The native provider layout, semantic surfaces and provider marks are adapted from
+[OpenUsage v0.7.13](https://github.com/robinebers/openusage/tree/v0.7.13), Copyright
+2026 Robin Ebers, under MIT. The [full license](docs/OpenUsage-LICENSE.txt) is also
+bundled in the downloadable app. Lidcode adds its own keep-awake card and setup
+controls; this is not the complete OpenUsage feature set.

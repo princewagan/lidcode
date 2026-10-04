@@ -38,6 +38,8 @@ cp ".build/$CONFIG/lidcode-helper" "$APP/Contents/Helpers/lidcode-helper"
 cp ".build/$CONFIG/lidcode" "$APP/Contents/Helpers/lidcode"
 # Committed, so a normal build never re-renders it — see Script/make-asset.sh.
 cp "Resource/LidCode.icns" "$APP/Contents/Resources/LidCode.icns"
+cp -R Resource/ProviderIcons "$APP/Contents/Resources/ProviderIcons"
+cp docs/OpenUsage-LICENSE.txt "$APP/Contents/Resources/OpenUsage-LICENSE.txt"
 
 # Installer for the bundled helper. Runs *as root* in its entirety (the app asks for
 # authorisation once, through the system prompt), so there is no `sudo` in here — and
@@ -99,8 +101,8 @@ cat > "$APP/Contents/Info.plist" <<PLIST
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
-  <key>CFBundleName</key>              <string>LidCode</string>
-  <key>CFBundleDisplayName</key>       <string>LidCode</string>
+  <key>CFBundleName</key>              <string>Lidcode</string>
+  <key>CFBundleDisplayName</key>       <string>Lidcode</string>
   <key>CFBundleIdentifier</key>        <string>com.bygelo.lidcode</string>
   <key>CFBundleExecutable</key>        <string>LidCode</string>
   <key>CFBundleIconFile</key>          <string>LidCode</string>
@@ -138,9 +140,9 @@ sign() {
 
 # The nested helper is its own Mach-O and has to be signed before the bundle
 # that contains it, or `codesign --verify --deep` rejects the result.
-sign "$APP/Contents/Helpers/lidcode-helper" || true
-sign "$APP/Contents/Helpers/lidcode" || true
-sign "$APP" || true
+sign "$APP/Contents/Helpers/lidcode-helper"
+sign "$APP/Contents/Helpers/lidcode"
+sign "$APP"
 
 echo "==> built $APP"
 echo "    open $APP"
