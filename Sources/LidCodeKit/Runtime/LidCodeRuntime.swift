@@ -1260,7 +1260,7 @@ public final class LidCodeRuntime: @unchecked Sendable {
         // and a dictionary filter on the overwhelming majority of ticks. It still has
         // to happen here rather than in the view: they touch the filesystem, and the
         // main thread is not allowed to.
-        let newAgentSession = agentSessionForTest ?? sessionReader.readAgentSession()
+        let newAgentSession = agentSessionForTest ?? sessionReader.readAgentSession(isWarpEnabled: setting.isWarpIntegrationOn)
         let newActiveCount = newAgentSession.activeCount
 
         // BUG 1 FIX: Cooldown clearing rule. After a .timerExpired stop, the cooldown

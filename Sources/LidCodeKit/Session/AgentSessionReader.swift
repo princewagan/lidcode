@@ -95,7 +95,7 @@ public struct AgentLogLine: Sendable, Equatable {
 
 // MARK: - AgentSessionReader
 
-/// Reads live agent activity out of Warp's log and builds an `AgentSessionSnapshot`.
+/// Combines native Claude/Codex transcripts with optional local Warp events.
 ///
 /// The reader maintains an in-memory state machine for each session keyed by session UUID.
 /// On every `read()` call it:
@@ -161,6 +161,7 @@ public final class AgentSessionReader: @unchecked Sendable {
     private let logURL: URL
     private let databaseURL: URL
     private let aiTitleReader: AITitleReader
+    private let nativeReader: NativeSessionReader
 
     // MARK: - Cache for log file
 
@@ -180,13 +181,15 @@ public final class AgentSessionReader: @unchecked Sendable {
 
     // MARK: - Init
 
-    public init(logURL: URL? = nil, databaseURL: URL? = nil) {
+    public init(logURL: URL? = nil, databaseURL: URL? = nil, nativeProfiles: [AIProfile]? = nil) {
         let home = FileManager.default.homeDirectoryForCurrentUser
         self.logURL = logURL ?? home.appendingPathComponent("Library/Logs/warp.log")
         self.databaseURL = databaseURL ?? home.appendingPathComponent(
             "Library/Group Containers/2BBY89MBSN.dev.warp"
                 + "/Library/Application Support/dev.warp.Warp-Stable/warp.sqlite")
         self.aiTitleReader = AITitleReader()
+        // Explicit log fixtures stay isolated from the real user’s transcripts.
+        self.nativeReader = NativeSessionReader(profiles: nativeProfiles ?? (logURL == nil ? nil : []))
     }
 
     // MARK: - Primary read (new API)
@@ -196,21 +199,18 @@ public final class AgentSessionReader: @unchecked Sendable {
     /// Cheap enough to call on the runtime's 5s tick: an unchanged log costs
     /// one `stat` and a dictionary pass.
     ///
-    /// W1 integration note (step 2.5): replace `session = sessionReader.read()` with
-    /// `agentSession = sessionReader.readAgentSession()` in LidCodeRuntime.swift after
-    /// renaming the ivar from `session: SessionSnapshot` to `agentSession: AgentSessionSnapshot`.
-    public func readAgentSession(asOf now: Date = Date()) -> AgentSessionSnapshot {
+    public func readAgentSession(asOf now: Date = Date(), isWarpEnabled: Bool = true) -> AgentSessionSnapshot {
         lock.lock()
         defer { lock.unlock() }
 
-        refreshLogIfChanged()
+        if isWarpEnabled { refreshLogIfChanged() }
         pruneAndTimeout(asOf: now)
 
         // Build AgentSessionInfo for every non-pruned session.
         var infos: [AgentSessionInfo] = []
         var nextPreviousStatus: [String: AgentStatus] = [:]
 
-        for (_, sess) in sessionMap {
+        for (_, sess) in sessionMap where isWarpEnabled {
             // Corroborate status with transcript mtime.
             let titleResult = aiTitleReader.resolve(cwd: sess.cwd, sessionId: sess.id)
             let effectiveStatus = activityStatus(
@@ -221,18 +221,6 @@ public final class AgentSessionReader: @unchecked Sendable {
                 asOf: now
             )
             nextPreviousStatus[sess.id] = effectiveStatus
-
-            // Codex fallback: if no transcript exists, use log-event state machine
-            // with a shorter idle window. The effectiveStatus above already handles
-            // this via activityStatus returning .finished when transcriptMtime is nil
-            // and the session is not in-flight.
-            //
-            // CODEX_VERIFY: Real-world verification needed. Codex sessions emit OSC 777
-            // events and are processed identically to Claude sessions here. The key
-            // question is whether Codex writes JSONL transcripts to ~/.claude/projects/.
-            // If not, the fallback path (log-event only, no transcript corroboration)
-            // is the correct behaviour — but the shorter idle window (120s vs 600s) for
-            // Codex needs live testing to confirm the right threshold.
 
             // Resolve title.
             let resolvedTitle: String
@@ -275,6 +263,28 @@ public final class AgentSessionReader: @unchecked Sendable {
 
         previousStatus = nextPreviousStatus
 
+        // Combine by session id so Warp and a native transcript never count twice.
+        // A newer native event can finish a turn or resume a blocked Warp session.
+        for native in nativeReader.read(asOf: now) {
+            if let index = infos.firstIndex(where: { $0.id == native.id && $0.agent == native.agent }) {
+                let existing = infos[index]
+                // Warp timestamps have second precision. At a tie, preserve its
+                // explicit permission/error state; a native completion still beats
+                // a running state. A genuinely newer turn can resume either.
+                let winsTie = native.lastSeenAt == existing.lastSeenAt
+                    && existing.status != .blocked && existing.status != .error
+                    && (native.status == .finished || existing.status == .running)
+                if native.lastSeenAt > existing.lastSeenAt || winsTie {
+                    var merged = native
+                    if native.titleSource == "cwd-basename" {
+                        merged.title = infos[index].title
+                        merged.titleSource = infos[index].titleSource
+                    }
+                    infos[index] = merged
+                }
+            } else { infos.append(native) }
+        }
+
         // Sort: running first, then blocked, error, finished. Within a group: most-recently-seen first.
         let statusOrder: (AgentStatus) -> Int = {
             switch $0 {
@@ -291,7 +301,7 @@ public final class AgentSessionReader: @unchecked Sendable {
         }
 
         var snapshot = AgentSessionSnapshot(sessions: infos)
-        if snapshot.activeCount == 0 {
+        if snapshot.activeCount == 0 && isWarpEnabled {
             snapshot.fallbackName = fallbackName(asOf: now)
         }
         return snapshot
@@ -345,6 +355,9 @@ public final class AgentSessionReader: @unchecked Sendable {
         inFlight: Bool,
         asOf now: Date
     ) -> AgentStatus {
+        // Explicit stop and timeout must not be revived by a recent metadata write.
+        if logStatus == .finished { return .finished }
+
         // Sticky: blocked and error are never time-decayed.
         if logStatus == .blocked || logStatus == .error { return logStatus }
 

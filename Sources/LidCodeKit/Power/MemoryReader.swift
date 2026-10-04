@@ -1,4 +1,5 @@
 import Foundation
+import Darwin
 
 /// Reads system memory state from two sysctl keys and `ps -Ao rss,comm`.
 ///
@@ -38,17 +39,36 @@ public enum MemoryReader {
 
     private static func readFresh(asOf now: Date) -> MemoryReading? {
         guard let pressure = readPressure() else { return nil }
-        guard let (swapUsed, swapTotal, swapPercent) = readSwap() else { return nil }
+        guard let (swapUsed, swapTotal, _) = readSwap(),
+              let memoryPercent = readMemoryPercent() else { return nil }
         let apps = readApps()
 
         return MemoryReading(
             pressure: pressure,
-            usedPercent: swapPercent,
+            usedPercent: memoryPercent,
             swapUsedMegabyte: swapUsed,
             swapTotalMegabyte: swapTotal,
             app: apps,
             readAt: now
         )
+    }
+
+    /// Physical RAM in use, excluding reclaimable file cache and purgeable pages.
+    static func readMemoryPercent() -> Double? {
+        var stats = vm_statistics64_data_t()
+        var count = mach_msg_type_number_t(MemoryLayout<vm_statistics64_data_t>.size / MemoryLayout<integer_t>.size)
+        let result = withUnsafeMutablePointer(to: &stats) { pointer in
+            pointer.withMemoryRebound(to: integer_t.self, capacity: Int(count)) {
+                host_statistics64(mach_host_self(), HOST_VM_INFO64, $0, &count)
+            }
+        }
+        guard result == KERN_SUCCESS else { return nil }
+        let usedPages = max(0, Double(stats.active_count) + Double(stats.inactive_count)
+            + Double(stats.wire_count) + Double(stats.compressor_page_count)
+            - Double(stats.purgeable_count) - Double(stats.external_page_count))
+        let total = Double(ProcessInfo.processInfo.physicalMemory)
+        guard total > 0 else { return nil }
+        return min(100, usedPages * Double(vm_kernel_page_size) / total * 100)
     }
 
     // MARK: - Pressure

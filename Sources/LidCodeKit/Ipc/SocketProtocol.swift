@@ -46,6 +46,7 @@ public struct SettingPatch: Codable, Sendable {
     public var isChargingOnly: Bool?
     public var thermalCeiling: ThermalLevel?
     public var isNetworkProbeOn: Bool?
+    public var isWarpIntegrationOn: Bool?
     public var isBatteryGuardOn: Bool?
     public var isThermalGuardOn: Bool?
     public var sustainedHeatSecond: Int?
@@ -57,6 +58,10 @@ public struct SettingPatch: Codable, Sendable {
     public var menuBarShowErrorBadge: Bool?
     public var menuBarShowTempWarnIcon: Bool?
     public var menuBarShowAlertIcon: Bool?
+    public var menuBarShowClaude5h: Bool?
+    public var menuBarShowClaude1w: Bool?
+    public var menuBarShowCodex5h: Bool?
+    public var menuBarShowCodex1w: Bool?
     public var isDimOnLidCloseOn: Bool?
     public var isMemoryWarningOn: Bool?
     public var memoryWarnSwapPercent: Int?
@@ -70,6 +75,7 @@ public struct SettingPatch: Codable, Sendable {
         isChargingOnly: Bool? = nil,
         thermalCeiling: ThermalLevel? = nil,
         isNetworkProbeOn: Bool? = nil,
+        isWarpIntegrationOn: Bool? = nil,
         isBatteryGuardOn: Bool? = nil,
         isThermalGuardOn: Bool? = nil,
         sustainedHeatSecond: Int? = nil,
@@ -80,6 +86,10 @@ public struct SettingPatch: Codable, Sendable {
         menuBarShowErrorBadge: Bool? = nil,
         menuBarShowTempWarnIcon: Bool? = nil,
         menuBarShowAlertIcon: Bool? = nil,
+        menuBarShowClaude5h: Bool? = nil,
+        menuBarShowClaude1w: Bool? = nil,
+        menuBarShowCodex5h: Bool? = nil,
+        menuBarShowCodex1w: Bool? = nil,
         isDimOnLidCloseOn: Bool? = nil,
         isMemoryWarningOn: Bool? = nil,
         memoryWarnSwapPercent: Int? = nil,
@@ -92,6 +102,7 @@ public struct SettingPatch: Codable, Sendable {
         self.isChargingOnly = isChargingOnly
         self.thermalCeiling = thermalCeiling
         self.isNetworkProbeOn = isNetworkProbeOn
+        self.isWarpIntegrationOn = isWarpIntegrationOn
         self.isBatteryGuardOn = isBatteryGuardOn
         self.isThermalGuardOn = isThermalGuardOn
         self.sustainedHeatSecond = sustainedHeatSecond
@@ -102,6 +113,10 @@ public struct SettingPatch: Codable, Sendable {
         self.menuBarShowErrorBadge = menuBarShowErrorBadge
         self.menuBarShowTempWarnIcon = menuBarShowTempWarnIcon
         self.menuBarShowAlertIcon = menuBarShowAlertIcon
+        self.menuBarShowClaude5h = menuBarShowClaude5h
+        self.menuBarShowClaude1w = menuBarShowClaude1w
+        self.menuBarShowCodex5h = menuBarShowCodex5h
+        self.menuBarShowCodex1w = menuBarShowCodex1w
         self.isDimOnLidCloseOn = isDimOnLidCloseOn
         self.isMemoryWarningOn = isMemoryWarningOn
         self.memoryWarnSwapPercent = memoryWarnSwapPercent
@@ -112,11 +127,13 @@ public struct SettingPatch: Codable, Sendable {
     public var isEmpty: Bool {
         softBatteryPercent == nil && hardBatteryPercent == nil && idleReleaseSecond == nil
             && isChargingOnly == nil && thermalCeiling == nil && isNetworkProbeOn == nil
-            && isBatteryGuardOn == nil && isThermalGuardOn == nil
+            && isBatteryGuardOn == nil && isThermalGuardOn == nil && isWarpIntegrationOn == nil
             && sustainedHeatSecond == nil && holdSecond == nil
             && menuBarShowStateIcon == nil && menuBarShowActiveBadge == nil
             && menuBarShowBlockedBadge == nil && menuBarShowErrorBadge == nil
             && menuBarShowTempWarnIcon == nil && menuBarShowAlertIcon == nil
+            && menuBarShowClaude5h == nil && menuBarShowClaude1w == nil
+            && menuBarShowCodex5h == nil && menuBarShowCodex1w == nil
             && isDimOnLidCloseOn == nil
             && isMemoryWarningOn == nil && memoryWarnSwapPercent == nil
             && memoryCriticalSwapPercent == nil && memoryAppRowCount == nil
@@ -130,6 +147,7 @@ public struct SettingPatch: Codable, Sendable {
         if let isChargingOnly { copy.isChargingOnly = isChargingOnly }
         if let thermalCeiling { copy.thermalCeiling = thermalCeiling }
         if let isNetworkProbeOn { copy.isNetworkProbeOn = isNetworkProbeOn }
+        if let isWarpIntegrationOn { copy.isWarpIntegrationOn = isWarpIntegrationOn }
         if let isBatteryGuardOn { copy.isBatteryGuardOn = isBatteryGuardOn }
         if let isThermalGuardOn { copy.isThermalGuardOn = isThermalGuardOn }
         if let sustainedHeatSecond { copy.sustainedHeatSecond = sustainedHeatSecond }
@@ -140,6 +158,10 @@ public struct SettingPatch: Codable, Sendable {
         if let menuBarShowErrorBadge { copy.menuBarShowErrorBadge = menuBarShowErrorBadge }
         if let menuBarShowTempWarnIcon { copy.menuBarShowTempWarnIcon = menuBarShowTempWarnIcon }
         if let menuBarShowAlertIcon { copy.menuBarShowAlertIcon = menuBarShowAlertIcon }
+        if let menuBarShowClaude5h { copy.menuBarShowClaude5h = menuBarShowClaude5h }
+        if let menuBarShowClaude1w { copy.menuBarShowClaude1w = menuBarShowClaude1w }
+        if let menuBarShowCodex5h { copy.menuBarShowCodex5h = menuBarShowCodex5h }
+        if let menuBarShowCodex1w { copy.menuBarShowCodex1w = menuBarShowCodex1w }
         if let isDimOnLidCloseOn { copy.isDimOnLidCloseOn = isDimOnLidCloseOn }
         if let isMemoryWarningOn { copy.isMemoryWarningOn = isMemoryWarningOn }
         if let memoryWarnSwapPercent { copy.memoryWarnSwapPercent = memoryWarnSwapPercent }

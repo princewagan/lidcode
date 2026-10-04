@@ -57,10 +57,7 @@ public struct MemoryApp: Codable, Sendable, Equatable {
 public struct MemoryReading: Codable, Sendable, Equatable {
     /// Kernel-reported memory pressure level.
     public var pressure: MemoryPressureLevel
-    /// Approximate used percentage 0...100.
-    ///
-    /// Derived from `vm.swapusage`: used / total * 100. When swap total is 0 (desktop
-    /// Macs without swap configured), this is 0.
+    /// Percentage of physical RAM in use, excluding reclaimable file cache and purgeable pages.
     public var usedPercent: Double
     /// Swap used, in megabytes.
     public var swapUsedMegabyte: Double

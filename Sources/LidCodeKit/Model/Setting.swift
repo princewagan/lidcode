@@ -17,6 +17,8 @@ public struct Setting: Codable, Sendable, Equatable {
     /// Executable name that counts as live work. Matched exactly against the
     /// process's basename (see `ProcessWatcher.matches`), not as a substring.
     public var watchPattern: [String]
+    /// Read optional Warp activity events and tab titles from this user’s local files.
+    public var isWarpIntegrationOn: Bool
     /// Whether the health panel is allowed to touch the network — DNS, and a HEAD to
     /// the API of whichever agent is currently holding a lease. Off makes LidCode
     /// completely silent on the wire; the local half of the panel still works.
@@ -69,7 +71,7 @@ public struct Setting: Codable, Sendable, Equatable {
     public var holdSecond: Int
     /// The deadline of the most-recently started timed hold, persisted so that
     /// an app restart mid-hold continues from the original expiry rather than
-    /// giving the user a fresh 6-hour window. Cleared when the hold ends.
+    /// giving the user a fresh 3-hour window. Cleared when the hold ends.
     ///
     /// `LidCodeRuntime.start()` reads this on launch; `stopLocked` clears it;
     /// `beginHoldLocked` writes it whenever a new expiry is computed.
@@ -91,6 +93,10 @@ public struct Setting: Codable, Sendable, Equatable {
     public var menuBarShowTempWarnIcon: Bool
     /// Show the blocking guard alert icon (red thermometer / red battery) in the menu bar.
     public var menuBarShowAlertIcon: Bool
+    public var menuBarShowClaude5h: Bool
+    public var menuBarShowClaude1w: Bool
+    public var menuBarShowCodex5h: Bool
+    public var menuBarShowCodex1w: Bool
 
     /// Whether the user has closed-lid protection armed. Restored on launch only
     /// alongside a still-live `activeHoldExpiresAt`, so it can never outlive the
@@ -116,7 +122,7 @@ public struct Setting: Codable, Sendable, Equatable {
 
     /// Bump this, and add a case to `migrated()`, when a shipped default has to change
     /// for people who already have a settings file.
-    public static let currentVersion = 2
+    public static let currentVersion = 3
 
     public static let memoryWarnSwapRange    = 10...95
     public static let memoryCriticalSwapRange = 20...99
@@ -124,12 +130,12 @@ public struct Setting: Codable, Sendable, Equatable {
 
     public static let softBatteryRange = 15...50
     public static let hardBatteryRange = 4...8
-    /// Changed from 8h to 6h so the slider's intervals are better spaced (J6).
-    public static let maxSessionSecond = 6 * 3600
-    /// Half an hour to six hours (J6). The lower bound is not a UI nicety — a hold
+    /// Maximum duration for every timer entry point.
+    public static let maxSessionSecond = 3 * 3600
+    /// Half an hour to three hours. The lower bound is not a UI nicety — a hold
     /// shorter than the health sweep's own cadence would expire before the panel had
     /// anything true to say about it.
-    public static let holdRange = 1800...maxSessionSecond
+    public static let holdRange = 0...maxSessionSecond
     /// The slider snaps to half-hour steps. A duration picked by dragging does not
     /// deserve minute precision, and round numbers are what people actually check
     /// against a clock.
@@ -187,7 +193,7 @@ public struct Setting: Codable, Sendable, Equatable {
         isBatteryGuardOn: true,
         isThermalGuardOn: true,
         sustainedHeatSecond: 900,
-        holdSecond: 6 * 3600,
+        holdSecond: 3600,
         // All menu bar icons default to visible (I2).
         menuBarShowStateIcon: true,
         menuBarShowActiveBadge: true,
@@ -195,6 +201,10 @@ public struct Setting: Codable, Sendable, Equatable {
         menuBarShowErrorBadge: true,
         menuBarShowTempWarnIcon: true,
         menuBarShowAlertIcon: true,
+        menuBarShowClaude5h: true,
+        menuBarShowClaude1w: false,
+        menuBarShowCodex5h: false,
+        menuBarShowCodex1w: false,
         isClamshellArmed: false,
         isDimOnLidCloseOn: true,
         settingVersion: currentVersion,
@@ -214,10 +224,11 @@ public struct Setting: Codable, Sendable, Equatable {
         isChargingOnly: Bool,
         watchPattern: [String],
         isNetworkProbeOn: Bool = true,
+        isWarpIntegrationOn: Bool = true,
         isBatteryGuardOn: Bool = true,
         isThermalGuardOn: Bool = true,
         sustainedHeatSecond: Int = 900,
-        holdSecond: Int = 6 * 3600,
+        holdSecond: Int = 3600,
         activeHoldExpiresAt: Date? = nil,
         menuBarShowStateIcon: Bool = true,
         menuBarShowActiveBadge: Bool = true,
@@ -225,6 +236,10 @@ public struct Setting: Codable, Sendable, Equatable {
         menuBarShowErrorBadge: Bool = true,
         menuBarShowTempWarnIcon: Bool = true,
         menuBarShowAlertIcon: Bool = true,
+        menuBarShowClaude5h: Bool = true,
+        menuBarShowClaude1w: Bool = false,
+        menuBarShowCodex5h: Bool = false,
+        menuBarShowCodex1w: Bool = false,
         isClamshellArmed: Bool = false,
         isDimOnLidCloseOn: Bool = true,
         settingVersion: Int = Setting.currentVersion,
@@ -240,6 +255,7 @@ public struct Setting: Codable, Sendable, Equatable {
         self.isChargingOnly = isChargingOnly
         self.watchPattern = watchPattern
         self.isNetworkProbeOn = isNetworkProbeOn
+        self.isWarpIntegrationOn = isWarpIntegrationOn
         self.isBatteryGuardOn = isBatteryGuardOn
         self.isThermalGuardOn = isThermalGuardOn
         self.sustainedHeatSecond = sustainedHeatSecond
@@ -251,6 +267,10 @@ public struct Setting: Codable, Sendable, Equatable {
         self.menuBarShowErrorBadge = menuBarShowErrorBadge
         self.menuBarShowTempWarnIcon = menuBarShowTempWarnIcon
         self.menuBarShowAlertIcon = menuBarShowAlertIcon
+        self.menuBarShowClaude5h = menuBarShowClaude5h
+        self.menuBarShowClaude1w = menuBarShowClaude1w
+        self.menuBarShowCodex5h = menuBarShowCodex5h
+        self.menuBarShowCodex1w = menuBarShowCodex1w
         self.isClamshellArmed = isClamshellArmed
         self.isDimOnLidCloseOn = isDimOnLidCloseOn
         self.settingVersion = settingVersion
@@ -281,6 +301,8 @@ public struct Setting: Codable, Sendable, Equatable {
             ?? fallback.isChargingOnly
         watchPattern = try container.decodeIfPresent([String].self, forKey: .watchPattern)
             ?? fallback.watchPattern
+        isWarpIntegrationOn = try container.decodeIfPresent(Bool.self, forKey: .isWarpIntegrationOn)
+            ?? fallback.isWarpIntegrationOn
         isNetworkProbeOn = try container.decodeIfPresent(Bool.self, forKey: .isNetworkProbeOn)
             ?? fallback.isNetworkProbeOn
         isBatteryGuardOn = try container.decodeIfPresent(Bool.self, forKey: .isBatteryGuardOn)
@@ -304,6 +326,10 @@ public struct Setting: Codable, Sendable, Equatable {
             ?? fallback.menuBarShowTempWarnIcon
         menuBarShowAlertIcon = try container.decodeIfPresent(Bool.self, forKey: .menuBarShowAlertIcon)
             ?? fallback.menuBarShowAlertIcon
+        menuBarShowClaude5h = try container.decodeIfPresent(Bool.self, forKey: .menuBarShowClaude5h) ?? fallback.menuBarShowClaude5h
+        menuBarShowClaude1w = try container.decodeIfPresent(Bool.self, forKey: .menuBarShowClaude1w) ?? fallback.menuBarShowClaude1w
+        menuBarShowCodex5h = try container.decodeIfPresent(Bool.self, forKey: .menuBarShowCodex5h) ?? fallback.menuBarShowCodex5h
+        menuBarShowCodex1w = try container.decodeIfPresent(Bool.self, forKey: .menuBarShowCodex1w) ?? fallback.menuBarShowCodex1w
         isClamshellArmed = try container.decodeIfPresent(Bool.self, forKey: .isClamshellArmed)
             ?? fallback.isClamshellArmed
         isDimOnLidCloseOn = try container.decodeIfPresent(Bool.self, forKey: .isDimOnLidCloseOn)
@@ -334,6 +360,7 @@ public struct Setting: Codable, Sendable, Equatable {
             // old default is moved; anyone who had picked `.fair` deliberately keeps it.
             if copy.thermalCeiling == .critical { copy.thermalCeiling = .serious }
         }
+        if copy.settingVersion < 3, copy.holdSecond == 3 * 3600 { copy.holdSecond = 3600 }
         copy.settingVersion = Setting.currentVersion
         return copy
     }
@@ -356,7 +383,7 @@ public struct Setting: Codable, Sendable, Equatable {
         // Snapped *before* clamping would let 100s round to 0 and then clamp up to the
         // minimum, which is fine, but snapping after keeps every reachable value a real
         // multiple of the step — the slider and a hand-edited file agree on the grid.
-        // Clamp to 6h max (J6): any persisted value above 6h is brought down.
+        // Clamp to 3h max: any persisted value above 3h is brought down.
         copy.holdSecond = Self.snappedHold(holdSecond)
         // Memory monitoring: clamp each threshold to its range, then ensure
         // critical is strictly greater than warn (same pattern as soft/hard battery).

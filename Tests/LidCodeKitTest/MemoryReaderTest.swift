@@ -400,3 +400,12 @@ final class MemoryHelperMergeTest: XCTestCase {
         XCTAssertEqual(MemoryReader.appName(from: "claude.exe"), "Claude")
     }
 }
+
+final class PhysicalMemoryReadingTest: XCTestCase {
+    func testReadsPhysicalMemoryWithoutDependingOnSwapCapacity() throws {
+        let percent = try XCTUnwrap(MemoryReader.readMemoryPercent())
+        XCTAssertTrue(percent.isFinite)
+        XCTAssertGreaterThan(percent, 0)
+        XCTAssertLessThanOrEqual(percent, 100)
+    }
+}

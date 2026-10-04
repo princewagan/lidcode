@@ -274,8 +274,9 @@ public actor HealthProbe {
             case .warn:     state = .degraded
             case .normal:   state = .ok
             }
-            let detail = String(format: "swap %.0f/%.0f MB (%.0f%%)",
-                mem.swapUsedMegabyte, mem.swapTotalMegabyte, mem.usedPercent)
+            let detail = state == .ok
+                ? String(format: "Memory used: %.0f%%", mem.usedPercent)
+                : String(format: "Memory running low — %.0f%% used; close unused apps", mem.usedPercent)
             check.append(HealthCheck(
                 id: "device.memory", group: .device, label: "Memory",
                 state: state, detail: detail))

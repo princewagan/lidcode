@@ -18,8 +18,8 @@ final class SettingGuardTest: XCTestCase {
 
     func testDefaultsMatchTheContract() {
         XCTAssertEqual(Setting.default.sustainedHeatSecond, 900)
-        // J6: max changed from 8h to 6h — default holdSecond is now 6h.
-        XCTAssertEqual(Setting.default.holdSecond, 6 * 3600)
+        // J6: max changed from 8h to 3h — default holdSecond is now 3h.
+        XCTAssertEqual(Setting.default.holdSecond, 3 * 3600)
     }
 
     func testDefaultIsAlreadyNormalized() {
@@ -55,8 +55,8 @@ final class SettingGuardTest: XCTestCase {
         XCTAssertTrue(decoded.isBatteryGuardOn)
         XCTAssertTrue(decoded.isThermalGuardOn)
         XCTAssertEqual(decoded.sustainedHeatSecond, 900)
-        // J6: max changed to 6h — an older file without holdSecond gets the new default.
-        XCTAssertEqual(decoded.holdSecond, 6 * 3600)
+        // J6: max changed to 3h — an older file without holdSecond gets the new default.
+        XCTAssertEqual(decoded.holdSecond, 3 * 3600)
     }
 
     func testEmptyObjectDecodesToDefaults() throws {
@@ -94,8 +94,8 @@ final class SettingGuardTest: XCTestCase {
         XCTAssertEqual(clampedHold(3600), 3600)
         XCTAssertEqual(clampedHold(3700), 3600, "rounds down to the nearer step")
         XCTAssertEqual(clampedHold(5340), 5400, "rounds up to the nearer step")
-        // Range updated to 6h max (J6).
-        for second in stride(from: 1800, through: 21600, by: 137) {
+        // Range updated to 3h max (J6).
+        for second in stride(from: 1800, through: 10800, by: 137) {
             XCTAssertEqual(
                 clampedHold(second) % Setting.holdStepSecond, 0,
                 "\(second) did not land on the grid")
