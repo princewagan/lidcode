@@ -33,7 +33,7 @@ natively every five minutes and with **⌘R**. Other AI tools can still use Lidc
 process watching and CLI work leases; this release's usage cards support Claude
 and Codex. AI profile configuration is stored in `~/.lidcode/ai-profiles.json`.
 
-<img src="docs/screenshots/dashboard-dark.png" alt="Lidcode provider dashboard with Claude, Codex and keep-awake controls" width="320">
+<img src="docs/screenshots/dashboard-dark.png" alt="Lidcode provider dashboard with Claude, Codex and keep-awake controls" width="320"> <img src="docs/screenshots/settings-dark.png" alt="Settings with battery and temperature safety guards" width="320">
 
 ### Your agent is still working. You want to close the lid and go to bed.
 
@@ -92,15 +92,15 @@ Four independent paths back to normal sleep. Reverting only on next launch — w
 |---|---|---|
 | Hard battery floor | 4% (4–8) | `pmset sleepnow` — must beat *every* assertion, not just ours |
 | Critical thermal, lid shut | — | force sleep (no airflow, so releasing is not enough) |
-| Soft battery floor | 20% (15–50) | release, sleep normally with headroom to resume |
-| Thermal ceiling | critical | release |
+| Soft battery floor | 15% (15–50) | release, sleep normally with headroom to resume |
+| Thermal ceiling | serious for 15m | release after sustained heat |
 | Charging-only | off | release on battery |
 
-Both floors are on for everyone. A guardrail behind a paywall is not a guardrail.
+Battery and temperature guards are on by default. Settings can override the soft battery floor and sustained thermal ceiling; the hard battery floor and critical heat with the lid shut still force sleep.
 
 **A safety stop stays stopped.** Releasing the Mac does not stop the work — `claude` and `cargo` are still running, so the very next process scan wants to hold again. Left alone that turns a battery floor into a 10-second flap: release, re-acquire, release, forever, re-notifying you each time and never actually letting the Mac sleep. So a governor stop also *blocks* re-arming, and neither auto-watch nor `lidcode claim` can lift it.
 
-Recovery needs real clearance, not one point over the line. The block lifts only when the governor is fully satisfied — which, because it already warns until you are 10 points clear of the floor, means a release at 20% re-arms at 30% or on mains power. Clearing any earlier just reproduces the flap in slower motion. An explicit `lidcode start` overrides the block, once: the governor gets the next word five seconds later and stops it again if it was a bad idea, with the reason in `lidcode log`.
+Recovery needs real clearance, not one point over the line. The block lifts only when the governor is fully satisfied — which, because it already warns until you are 10 points clear of the floor, means a release at the configured floor re-arms at 10 points above it or on mains power. Clearing any earlier just reproduces the flap in slower motion. An explicit `lidcode start` overrides the block, once: the governor gets the next word five seconds later and stops it again if it was a bad idea, with the reason in `lidcode log`.
 
 The menu bar calls this state **Holding back**, distinct from **Idle** — idle means nothing wants the Mac awake, holding back means something does and it is not being allowed.
 

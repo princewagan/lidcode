@@ -29,6 +29,8 @@ struct SettingSection: View {
                       ? "Let your Mac sleep when the battery reaches this level."
                       : "Battery protection is disabled in your configuration.")
 
+                guardRow
+
                 Toggle("Keep awake only when plugged in", isOn: Binding(
                     get: { setting.isChargingOnly },
                     set: { model.updateSetting(SettingPatch(isChargingOnly: $0)) }
@@ -55,5 +57,31 @@ struct SettingSection: View {
         .controlSize(.small)
         .tint(theme.color)
         .toggleStyle(ThemeCheckboxStyle(color: theme.color))
+    }
+
+    /// Persistent overrides for the two user-waivable safety guards.
+    private var guardRow: some View {
+        HStack(spacing: 7) {
+            GuardToggle(
+                isOn: setting.isBatteryGuardOn,
+                onLabel: "Sleep at \(setting.softBatteryPercent)%",
+                offLabel: "Override battery",
+                symbolName: "battery.25",
+                detail: setting.isBatteryGuardOn
+                    ? "Battery protection is on. LidCode releases the hold at \(setting.softBatteryPercent)% so the Mac can sleep with charge left to resume. Click to override it."
+                    : "Battery protection is overridden. The hard \(setting.hardBatteryPercent)% floor still forces sleep and cannot be turned off.",
+                onToggle: { model.setBatteryGuard($0) }
+            )
+            GuardToggle(
+                isOn: setting.isThermalGuardOn,
+                onLabel: "Sleep when hot",
+                offLabel: "Override temp",
+                symbolName: "thermometer.medium",
+                detail: setting.isThermalGuardOn
+                    ? "Temperature protection is on. LidCode releases the hold after \(setting.sustainedHeatSecond / 60) continuous minutes at or above \(setting.thermalCeiling.display). Click to override it."
+                    : "Temperature protection is overridden. Critical heat while the lid is shut still forces sleep so the Mac can cool safely.",
+                onToggle: { model.setThermalGuard($0) }
+            )
+        }
     }
 }

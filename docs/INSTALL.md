@@ -28,7 +28,7 @@ This release supports Claude and Codex usage profiles. Other assistants can stil
 
 Use the dashboard's keep-awake button and duration slider. Closed-lid protection additionally needs the bundled helper. Click Install in the panel to authorize its installation once; regular keep-awake works without it.
 
-Battery and heat protections remain active. Use a hard, ventilated surface when the lid is closed. The helper reverts the system sleep setting if Lidcode disconnects or stops heartbeating.
+Battery and temperature guards are on by default and can be overridden in Options → Settings. The battery override bypasses the soft floor only; the hard floor still forces sleep. The temperature override bypasses the sustained ceiling only; critical heat with the lid shut still forces sleep. Use a hard, ventilated surface when the lid is closed. The helper reverts the system sleep setting if Lidcode disconnects or stops heartbeating.
 
 ## Optional command line
 
