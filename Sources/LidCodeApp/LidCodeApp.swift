@@ -31,7 +31,7 @@ import LidCodeKit
 /// by moving it off-screen. See the notes on `MenuPanel`.
 @MainActor
 final class AppDelegate: NSObject, NSApplicationDelegate {
-    let model = AppModel()
+    let model = AppModel(preview: CommandLine.arguments.contains("--render-preview"))
 
     private var statusItem: NSStatusItem?
     private var panelController: MenuPanelController?

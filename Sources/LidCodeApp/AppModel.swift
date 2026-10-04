@@ -151,9 +151,10 @@ final class AppModel: ObservableObject {
     // If LidCodePusher is not yet compiled (Push/ dir is empty), the call below
     // is wrapped in #if and will not block the build.
     // The file ownership note in the plan says W3 holds this; we wire it here.
-    nonisolated private let pusher = LidCodePusher()
+    nonisolated private let pusher: LidCodePusher?
 
-    init() {
+    init(preview: Bool = false) {
+        pusher = preview ? nil : LidCodePusher()
         runtime.onChange = { [weak self] snapshot in
             Task { @MainActor in
                 guard let self else { return }
@@ -176,7 +177,7 @@ final class AppModel: ObservableObject {
             // Push to Supabase off the main thread (W10). Non-blocking; silent on failure.
             Task.detached { [weak self] in
                 guard let self else { return }
-                self.pusher.pushIfChanged(snapshot, setting: self.runtime.currentSetting)
+                self.pusher?.pushIfChanged(snapshot, setting: self.runtime.currentSetting)
             }
         }
         runtime.onAlert = { [weak self] message in

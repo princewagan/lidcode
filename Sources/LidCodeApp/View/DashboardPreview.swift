@@ -23,7 +23,7 @@ enum DashboardPreview {
         for (name, appearance) in [("light", NSAppearance.Name.aqua), ("dark", NSAppearance.Name.darkAqua)] {
             NSApplication.shared.appearance = NSAppearance(named: appearance)
             for screen in ["dashboard", "hot", "very-hot", "hot-memory", "memory-warn", "memory-alert", "customize", "settings", "empty", "options", "about", "power", "four-accounts", "five-accounts", "eight-accounts"] {
-                let model = AppModel()
+                let model = AppModel(preview: true)
                 model.configurePreview(empty: screen == "empty", hot: screen == "hot" || screen == "hot-memory", memoryAlert: screen == "memory-alert", accountCount: screen == "four-accounts" ? 4 : screen == "five-accounts" ? 5 : screen == "eight-accounts" ? 8 : 2, veryHot: screen == "very-hot", memoryWarn: screen == "memory-warn" || screen == "hot-memory")
                 if screen == "customize" { model.screen = .customize }
                 if screen == "settings" { model.screen = .settings }
@@ -55,7 +55,7 @@ enum DashboardPreview {
             }
         }
         // Regression: navigate after the same observed root is already hosted.
-        let navigationModel = AppModel()
+        let navigationModel = AppModel(preview: true)
         navigationModel.configurePreview()
         let navigationHost = NSHostingView(rootView: DashboardContent(model: navigationModel))
         let navigationWindow = NSWindow(contentRect: NSRect(x: 0, y: 0, width: DashboardTheme.width, height: 500),
@@ -81,7 +81,6 @@ enum DashboardPreview {
         guard navigationHost.fittingSize.height != 250 else {
             throw CocoaError(.validationMissingMandatoryProperty)
         }
-        navigationWindow.orderOut(nil)
         // Theme changes must update the hosted root without a runtime/model tick.
         let savedTheme = UserDefaults.standard.object(forKey: "appTheme")
         defer {
@@ -121,6 +120,7 @@ enum DashboardPreview {
         guard try themedNavigation(.blue) == blueNavigation else {
             throw CocoaError(.validationMissingMandatoryProperty)
         }
+        navigationWindow.orderOut(nil)
         print("Hosted theme regression passed: all six colors update within 100 ms without a model tick")
         print("Dashboard previews rendered; hosted navigation regression passed")
     }
