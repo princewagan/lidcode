@@ -1,40 +1,12 @@
 import SwiftUI
 import LidCodeKit
 
-/// One colour family for the whole panel.
-///
-/// The version this replaces used seven hues at once — green rings, a teal thermal step,
-/// blue for a running timer, indigo in the power button, amber warnings, red floors, a
-/// yellow unknown. Every one of them was individually defensible and together they made a
-/// 340pt panel read as a dashboard: with everything coloured, colour stopped meaning
-/// anything, and the eye had no idea where to land first.
-///
-/// So the panel now draws in a single orange, and the *only* thing colour encodes is
-/// severity — how close a reading is to ending your hold. That is expressed as depth
-/// within the family rather than a change of hue:
-///
-///   `brandSoft`  fine, or stale/idle — present but not asking for you
-///   `brand`      the normal, live, working colour
-///   `brandDeep`  danger: the thing that is about to stop the Mac
-///
-/// Danger deliberately stays legible. Flattening a 4% battery into the same orange as a
-/// 90% one would be a prettier panel that fails at the one job it has, so the thresholds
-/// below are unchanged from the multi-hue version — only the colours they return moved.
+/// Native system colors match the provider dashboard and retain warning severity.
 enum Palette {
-    /// Claude orange, #D97757. The brand colour, and the panel's normal state.
-    static let brand = Color(red: 0.85, green: 0.47, blue: 0.34)
-    /// The hot end of the same pigment. Reads as "worse" next to `brand` without leaving
-    /// the family — which is what keeps a critical battery from disappearing into the
-    /// decoration while still not introducing a second hue.
-    static let brandDeep = Color(red: 0.76, green: 0.37, blue: 0.24)
-    /// Muted brand: healthy, idle, or stale. Same colour, quieter, so a panel with nothing
-    /// wrong is visually calm rather than blank.
-    static let brandSoft = brand.opacity(0.55)
-    /// The unfilled part of every bar. Deliberately `primary`, not the brand — a tinted
-    /// track competes with its own fill and makes short bars unreadable.
+    static let brand = Color(nsColor: .systemBlue)
+    static let brandDeep = Color(nsColor: .systemRed)
+    static let brandSoft = Color(nsColor: .systemBlue).opacity(0.65)
     static let track = Color.primary.opacity(0.10)
-    /// "No reading", which is not a severity and so must not be orange. Grey is hue-free,
-    /// so it cannot be mistaken for a position on the scale above.
     static let unknown = Color.secondary.opacity(0.45)
 
     static func color(for state: HealthState) -> Color {

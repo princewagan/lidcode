@@ -108,8 +108,11 @@ without them. Making them required would 400 every existing push.
   "claude_accounts": [
     {
       "key": "prince",
+      "label": "PRINCE CLAUDE",
       "five_hour_utilization": 14.0,
       "seven_day_utilization": 7.0,
+      "five_hour_resets_at": "2026-09-02T15:00:00Z",
+      "seven_day_resets_at": "2026-09-07T00:00:00Z",
       "is_active": true,
       "status": "ok"
     }
@@ -118,6 +121,7 @@ without them. Making them required would 400 every existing push.
 ```
 
 `pressure` is `"normal" | "warn" | "critical"`. `status` is `"ok"` | `"signed_out"` | `"expired"` or any other string the Mac app may add in future.
+`label` is the display name (for example, `ADVO CODEX`), and the reset fields are optional ISO timestamps. For Codex rows, `is_active` marks the profile whose login/session activity is newest.
 
 ---
 
@@ -127,7 +131,7 @@ Preview the dashboard without a Mac push or login:
 
 | URL | What it shows |
 |---|---|
-| `/?demo=1` | Full v2 fixture — memory warn, 6 app rows, 2 Claude accounts, 7 sessions |
+| `/?demo=1` | Full v2 fixture — memory warn, 6 app rows, 4 coding accounts, 7 sessions |
 | `/?demo=v1` | v1 fixture — no memory/accounts, proves backward compatibility is real |
 
 ---

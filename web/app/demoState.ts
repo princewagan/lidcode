@@ -155,25 +155,55 @@ const DEMO_MEMORY: LidCodeMemory = {
 };
 
 // ---------------------------------------------------------------------------
-// v2 claude_accounts fixture — two accounts, one active
+// v2 claude_accounts fixture — four coding accounts, one active per provider
 // ---------------------------------------------------------------------------
 
-const DEMO_CLAUDE_ACCOUNTS: LidCodeClaudeAccount[] = [
-  {
-    key: "prince",
-    five_hour_utilization: 14.0,
-    seven_day_utilization: 7.0,
-    is_active: true,
-    status: "ok",
-  },
-  {
-    key: "work",
-    five_hour_utilization: 9.0,
-    seven_day_utilization: 12.0,
-    is_active: false,
-    status: "ok",
-  },
-];
+function buildDemoClaudeAccounts(t: number): LidCodeClaudeAccount[] {
+  const fiveHourReset = (hours: number) => new Date(t + hours * HOUR).toISOString();
+  const sevenDayReset = (days: number) => new Date(t + days * 24 * HOUR).toISOString();
+  return [
+    {
+      key: "advo",
+      label: "ADVO CLAUDE",
+      five_hour_utilization: 14.0,
+      seven_day_utilization: 7.0,
+      five_hour_resets_at: fiveHourReset(3),
+      seven_day_resets_at: sevenDayReset(2),
+      is_active: false,
+      status: "ok",
+    },
+    {
+      key: "prince",
+      label: "PRINCE CLAUDE",
+      five_hour_utilization: 14.0,
+      seven_day_utilization: 7.0,
+      five_hour_resets_at: fiveHourReset(4),
+      seven_day_resets_at: sevenDayReset(3),
+      is_active: true,
+      status: "ok",
+    },
+    {
+      key: "advo-codex",
+      label: "ADVO CODEX",
+      five_hour_utilization: 29.0,
+      seven_day_utilization: 84.0,
+      five_hour_resets_at: fiveHourReset(2),
+      seven_day_resets_at: sevenDayReset(1),
+      is_active: true,
+      status: "ok",
+    },
+    {
+      key: "prince-codex",
+      label: "PRINCE CODEX",
+      five_hour_utilization: 69.0,
+      seven_day_utilization: 11.0,
+      five_hour_resets_at: fiveHourReset(5),
+      seven_day_resets_at: sevenDayReset(4),
+      is_active: false,
+      status: "ok",
+    },
+  ];
+}
 
 // ---------------------------------------------------------------------------
 // createDemoState — full v2 fixture (used by ?demo=1)
@@ -186,7 +216,7 @@ const DEMO_CLAUDE_ACCOUNTS: LidCodeClaudeAccount[] = [
 //   - 3 other apps also blocking sleep
 //   - 7 sessions: 2 running, 1 blocked, 1 error, 3 finished
 //   - memory: warn pressure, 78% used, 6 app rows including Claude
-//   - claude_accounts: 2 accounts (prince active, work inactive)
+//   - claude_accounts: 4 coding accounts (Prince Claude and ADVO Codex active)
 // ---------------------------------------------------------------------------
 
 export function createDemoState(now: Date = new Date()): LidCodeState {
@@ -216,7 +246,7 @@ export function createDemoState(now: Date = new Date()): LidCodeState {
     foreign_blocker_count: 3,
     sessions: buildSessions(t),
     memory: DEMO_MEMORY,
-    claude_accounts: DEMO_CLAUDE_ACCOUNTS,
+    claude_accounts: buildDemoClaudeAccounts(t),
   };
 }
 

@@ -46,29 +46,42 @@ public struct LidCodeMemoryPayload: Codable, Sendable {
     }
 }
 
-/// One Claude account, v2 only.
+/// One coding account, v2 only. The historical field name remains
+/// `claude_accounts` for dashboard compatibility.
 ///
 /// The two utilisation fields are non-optional here even though the reader leaves
 /// them nil for a signed-out account, because the Zod schema requires numbers. A
 /// missing window is sent as 0 and `status` carries the real story — the dashboard
-/// reads the status, not the zero, when deciding what to draw.
+/// reads the status, not the zero, when deciding what to draw. Reset timestamps are
+/// optional because a signed-out or malformed account has no window to report.
 public struct LidCodeClaudeAccountPayload: Codable, Sendable {
     public var key: String
+    /// Human-facing account label. Kept separate from `key` so the dashboard can
+    /// show names such as "ADVO CODEX" without making the machine key ambiguous.
+    public var label: String
     public var five_hour_utilization: Double
     public var seven_day_utilization: Double
+    public var five_hour_resets_at: String?
+    public var seven_day_resets_at: String?
     public var is_active: Bool
     public var status: String
 
     public init(
         key: String,
+        label: String,
         five_hour_utilization: Double,
         seven_day_utilization: Double,
+        five_hour_resets_at: String? = nil,
+        seven_day_resets_at: String? = nil,
         is_active: Bool,
         status: String
     ) {
         self.key = key
+        self.label = label
         self.five_hour_utilization = five_hour_utilization
         self.seven_day_utilization = seven_day_utilization
+        self.five_hour_resets_at = five_hour_resets_at
+        self.seven_day_resets_at = seven_day_resets_at
         self.is_active = is_active
         self.status = status
     }
@@ -496,8 +509,9 @@ public final class LidCodePusher: @unchecked Sendable {
             )
         }
 
-        // Which account is live right now. The reader returns three states in a nested
-        // optional and they must stay apart:
+        // Which account is live right now. Claude returns three states in a nested
+        // optional and they must stay apart; Codex carries its own producer marker
+        // because its account roots are independent CODEX_HOME processes:
         //
         //   nil          — detection failed, mark nobody
         //   .some(nil)   — the live account is the default slot, which has NO storage dir
@@ -505,17 +519,25 @@ public final class LidCodePusher: @unchecked Sendable {
         //
         // Flattening with `?? nil` collapsed the first two, so the default account could
         // never be marked active — it matched on nil, then got vetoed by the nil guard.
-        // Both accounts came back false on the dashboard.
+        // Both Claude accounts came back false on the dashboard.
         let detectedDir: String?? = ActiveClaudeAccountReader.readStorageDir()
         let accounts = snapshot.usage?.accounts ?? []
         let accountPayloads: [LidCodeClaudeAccountPayload]? = accounts.isEmpty ? nil : accounts.map { a in
-            LidCodeClaudeAccountPayload(
+            let isActive: Bool = {
+                if a.provider == "codex" { return a.isActive }
+                guard a.provider == "claude" else { return false }
+                return detectedDir.map { $0 == a.storageDir } ?? false
+            }()
+            return LidCodeClaudeAccountPayload(
                 key: a.key,
+                label: a.label,
                 // A signed-out account has no window at all. Zod wants a number, so send
                 // 0 and let `status` carry the real story to the dashboard.
                 five_hour_utilization: percent(a.fiveHour?.utilization) ?? 0,
                 seven_day_utilization: percent(a.sevenDay?.utilization) ?? 0,
-                is_active: detectedDir.map { $0 == a.storageDir } ?? false,
+                five_hour_resets_at: a.fiveHour?.resetsAt.map { Self.iso8601.string(from: $0) },
+                seven_day_resets_at: a.sevenDay?.resetsAt.map { Self.iso8601.string(from: $0) },
+                is_active: isActive,
                 status: a.status
             )
         }
@@ -593,7 +615,7 @@ public final class LidCodePusher: @unchecked Sendable {
             sessions: payload.sessions.map { "\($0.id):\($0.status)" }.sorted(),
             memory_pressure: payload.memory?.pressure,
             claude_accounts: payload.claude_accounts.map { list in
-                list.map { "\($0.key):\($0.status):\($0.is_active)" }.sorted()
+                list.map { "\($0.key):\($0.label):\($0.status):\($0.is_active)" }.sorted()
             },
             status_kind: payload.status_kind
         )

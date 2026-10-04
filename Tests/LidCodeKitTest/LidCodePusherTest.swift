@@ -94,13 +94,13 @@ private func makeV2Snapshot(
     ),
     accounts: [ClaudeAccountUsage] = [
         ClaudeAccountUsage(
-            key: "prince", label: "prince", status: "ok",
+            key: "prince", label: "PRINCE CLAUDE", status: "ok",
             fiveHour: UsageWindow(utilization: 0.0, resetsAt: nil),
             sevenDay: UsageWindow(utilization: 8.0, resetsAt: nil),
             storageDir: nil
         ),
         ClaudeAccountUsage(
-            key: "advo", label: "advo", status: "ok",
+            key: "advo", label: "ADVO CLAUDE", status: "ok",
             fiveHour: UsageWindow(utilization: 100.0, resetsAt: nil),
             sevenDay: UsageWindow(utilization: 38.0, resetsAt: nil),
             storageDir: "/Users/test/.claude-advo"
@@ -321,6 +321,39 @@ final class LidCodePusherTest: XCTestCase {
         XCTAssertEqual(accounts[0]["five_hour_utilization"] as? Double, 0.0)
         XCTAssertEqual(accounts[0]["seven_day_utilization"] as? Double, 0.0)
         XCTAssertEqual(accounts[0]["status"] as? String, "signed_out")
+    }
+
+    func testCodexAccountKeepsItsLabelUsesProducerActiveMarkerAndIncludesResets() throws {
+        let env = TempEnvFile(contents: "PUSH_SECRET=secret\n")
+        let stub = StubTransport()
+        let pusher = LidCodePusher(configPath: env.path, transport: stub.asTransport)
+
+        let snapshot = makeV2Snapshot(accounts: [
+            ClaudeAccountUsage(
+                key: "prince", label: "PRINCE CLAUDE", status: "ok",
+                fiveHour: UsageWindow(utilization: 10.0, resetsAt: nil),
+                sevenDay: UsageWindow(utilization: 20.0, resetsAt: nil),
+                storageDir: nil),
+            ClaudeAccountUsage(
+                key: "advo-codex", label: "ADVO CODEX", provider: "codex", isActive: true, status: "ok",
+                fiveHour: UsageWindow(utilization: 30.0, resetsAt: Date(timeIntervalSince1970: 1_788_136_200)),
+                sevenDay: UsageWindow(utilization: 40.0, resetsAt: Date(timeIntervalSince1970: 1_789_000_000)),
+                storageDir: nil)
+        ])
+        pusher.pushIfChanged(snapshot, setting: .default)
+
+        let e = expectation(description: "request")
+        DispatchQueue.global().asyncAfter(deadline: .now() + 0.2) { e.fulfill() }
+        wait(for: [e], timeout: 1.0)
+
+        let body = try XCTUnwrap(stub.requests.first?.httpBody)
+        let json = try XCTUnwrap(JSONSerialization.jsonObject(with: body) as? [String: Any])
+        let accounts = try XCTUnwrap(json["claude_accounts"] as? [[String: Any]])
+        let codex = try XCTUnwrap(accounts.first { ($0["key"] as? String) == "advo-codex" })
+        XCTAssertEqual(codex["label"] as? String, "ADVO CODEX")
+        XCTAssertEqual(codex["is_active"] as? Bool, true)
+        XCTAssertNotNil(codex["five_hour_resets_at"] as? String)
+        XCTAssertNotNil(codex["seven_day_resets_at"] as? String)
     }
 
     func testPayloadSnakeCaseKeys() throws {

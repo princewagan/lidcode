@@ -247,7 +247,7 @@ final class StorageDirParseTest: XCTestCase {
       "accounts": [
         {
           "key": "advo",
-          "label": "ADVO",
+          "label": "ADVO CLAUDE",
           "status": "ok",
           "severity": "normal",
           "storage_dir": "/Users/princewagan/.claude-advo",
@@ -256,7 +256,7 @@ final class StorageDirParseTest: XCTestCase {
         },
         {
           "key": "prince",
-          "label": "PRINCE",
+          "label": "PRINCE CLAUDE",
           "status": "ok",
           "severity": "warning",
           "storage_dir": null,
@@ -287,7 +287,7 @@ final class StorageDirParseTest: XCTestCase {
         {
           "fetched_at": "2026-08-31T00:00:00Z",
           "accounts": [
-            { "key": "advo", "label": "ADVO", "status": "signed_out" }
+            { "key": "advo", "label": "ADVO CLAUDE", "status": "signed_out" }
           ]
         }
         """.utf8)

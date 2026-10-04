@@ -34,19 +34,6 @@ struct SettingSection: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 7) {
-            Button {
-                isExpanded.toggle()
-            } label: {
-                HStack {
-                    SectionLabel(text: "Settings", trailing: isExpanded ? nil : summary)
-                    Image(systemName: isExpanded ? "chevron.up" : "chevron.down")
-                        .font(.system(size: 8, weight: .semibold))
-                        .foregroundStyle(.tertiary)
-                }
-                .contentShape(Rectangle())
-            }
-            .buttonStyle(.plain)
-
             if isExpanded {
                 // Duration slider moved to main panel (J5). Only guards + floors here.
                 guardRow

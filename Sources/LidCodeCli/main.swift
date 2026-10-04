@@ -1,4 +1,5 @@
 import Foundation
+import Darwin
 import LidCodeKit
 
 let cliVersion = LidCodeVersion.current
@@ -162,6 +163,51 @@ func runWrapped(_ argument: [String]) -> Never {
     exit(process.terminationStatus)
 }
 
+// MARK: - `lidcode codex <profile>`
+
+/// Start one Codex profile without changing the environment of any other
+/// Codex process. Each invocation gets its own CODEX_HOME, so two terminals can
+/// stay logged into different accounts at the same time.
+func runCodex(_ argument: [String]) -> Never {
+    let profiles: [AIProfile]
+    do {
+        profiles = try AIProfileStore.load().filter { $0.provider == .codex }
+    } catch { fail("cannot read AI profiles: \(error.localizedDescription)") }
+    guard let query = argument.first else {
+        fail("usage: lidcode codex <profile name or id> [codex arguments]; use --list to see profiles")
+    }
+    if query == "--list" {
+        for profile in profiles { print("\(profile.name)\t\(profile.id)\t\(profile.expandedDirectory)") }
+        exit(0)
+    }
+    let matches = profiles.filter { $0.id == query || $0.name.caseInsensitiveCompare(query) == .orderedSame }
+    guard matches.count == 1, let profile = matches.first else {
+        fail(matches.isEmpty ? "unknown Codex profile '\(query)'; add it in Options → Customize" :
+             "ambiguous profile name '\(query)'; use the id from lidcode codex --list")
+    }
+    let home = profile.expandedDirectory
+
+    // Replace this process instead of launching Codex through Foundation.Process.
+    // Process creates a new process group on macOS; an interactive child then is
+    // stopped by terminal job control because `lidcode` remains the foreground
+    // group. An exec keeps Codex in the caller's foreground group while changing
+    // only this process's CODEX_HOME, so other Codex sessions remain untouched.
+    guard setenv("CODEX_HOME", home, 1) == 0 else {
+        fail("cannot set CODEX_HOME: \(String(cString: strerror(errno)))")
+    }
+
+    let args = ["codex"] + Array(argument.dropFirst())
+    var cArguments: [UnsafeMutablePointer<CChar>?] = args.map { strdup($0) }
+    cArguments.append(nil)
+    cArguments.withUnsafeMutableBufferPointer { buffer in
+        _ = execvp(buffer.baseAddress![0], buffer.baseAddress!)
+    }
+
+    let error = String(cString: strerror(errno))
+    cArguments.dropLast().forEach { if let pointer = $0 { free(pointer) } }
+    fail("cannot start Codex: \(error)")
+}
+
 // MARK: - Dispatch
 
 let argument = Array(CommandLine.arguments.dropFirst())
@@ -198,6 +244,8 @@ guard let command = argument.first else {
       lidcode set --hold 4h              how long a timed hold runs for
       lidcode set --sustained-heat 15m   how long it must stay hot before releasing
       lidcode hook install [--project]   hold the Mac only while Claude Code works
+      lidcode codex <profile> [args]     start a configured Codex profile
+      lidcode codex --list               list profile names and ids
       lidcode doctor                     check the install, find a stuck disablesleep
     """)
     exit(0)
@@ -209,6 +257,9 @@ let mode = HoldMode(rawValue: flagValue("--mode", in: rest) ?? "smart") ?? .smar
 let ttl = flagValue("--ttl", in: rest).flatMap(parseSecond) ?? 300
 
 switch command {
+case "codex":
+    runCodex(rest)
+
 case "status":
     report(send(.status))
 

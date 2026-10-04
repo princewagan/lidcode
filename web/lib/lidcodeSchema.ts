@@ -65,8 +65,13 @@ export type LidCodeMemory = z.infer<typeof LidCodeMemorySchema>;
 
 export const LidCodeClaudeAccountSchema = z.object({
   key: z.string(),
+  // Optional so older Mac builds remain valid; new builds send the display name
+  // separately from the machine key (for example, "ADVO CODEX").
+  label: z.string().optional(),
   five_hour_utilization: z.number().min(0).max(100),
   seven_day_utilization: z.number().min(0).max(100),
+  five_hour_resets_at: z.string().datetime().optional(),
+  seven_day_resets_at: z.string().datetime().optional(),
   is_active: z.boolean(),
   status: z.string(), // "ok" | "signed_out" | "expired" | others
 });

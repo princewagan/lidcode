@@ -108,6 +108,33 @@ function formatTimeLeft(expiresAt: string, now: Date = new Date()): string {
   return `${totalSec}s left`;
 }
 
+/** Show both the countdown and the actual local reset time for a usage window. */
+function formatResetWindow(resetsAt: string | undefined): string | null {
+  if (!resetsAt) return null;
+  const date = new Date(resetsAt);
+  if (Number.isNaN(date.getTime())) return null;
+
+  const absolute = new Intl.DateTimeFormat(undefined, {
+    month: "short",
+    day: "numeric",
+    hour: "numeric",
+    minute: "2-digit",
+  }).format(date);
+  const remainingMs = date.getTime() - Date.now();
+  if (remainingMs <= 0) return `reset at ${absolute}`;
+
+  const totalMinutes = Math.floor(remainingMs / 60_000);
+  const days = Math.floor(totalMinutes / (24 * 60));
+  const hours = Math.floor((totalMinutes % (24 * 60)) / 60);
+  const minutes = totalMinutes % 60;
+  const relative = days > 0
+    ? `${days}d ${hours}h`
+    : hours > 0
+    ? `${hours}h ${minutes}m`
+    : `${Math.max(1, minutes)}m`;
+  return `resets in ${relative} · ${absolute}`;
+}
+
 // ---------------------------------------------------------------------------
 // Status vocabulary
 // ---------------------------------------------------------------------------
@@ -242,11 +269,13 @@ function BarGauge({
   fraction,
   color,
   value,
+  detail,
 }: {
   label: string;
   fraction: number;
   color: string;
   value: string;
+  detail?: string | null;
 }) {
   const clamped = Math.max(0, Math.min(1, fraction));
   return (
@@ -275,6 +304,11 @@ function BarGauge({
           {value}
         </span>
       </div>
+      {detail && (
+        <Micro style={{ color: "var(--lc-fg-4)", marginTop: -1 }}>
+          {detail}
+        </Micro>
+      )}
       {/* Track + fill — 6px tall matching the Mac app's 6pt bar */}
       <div
         style={{
@@ -740,6 +774,8 @@ function ClaudeAccountBlock({
   trailing,
   fiveHourPct,
   sevenDayPct,
+  fiveHourResetsAt,
+  sevenDayResetsAt,
   isActive,
   accountStatus,
 }: {
@@ -747,6 +783,8 @@ function ClaudeAccountBlock({
   trailing?: string | null;
   fiveHourPct: number | null;
   sevenDayPct: number | null;
+  fiveHourResetsAt?: string;
+  sevenDayResetsAt?: string;
   isActive: boolean;
   accountStatus: string;
 }) {
@@ -780,15 +818,22 @@ function ClaudeAccountBlock({
         fraction={isOk && fiveHourPct != null ? fiveHourPct / 100 : 0}
         color={barColor(fiveHourPct)}
         value={isOk && fiveHourPct != null ? `${Math.round(fiveHourPct)}%` : "—"}
+        detail={isOk ? formatResetWindow(fiveHourResetsAt) : null}
       />
       <BarGauge
         label="1 Week"
         fraction={isOk && sevenDayPct != null ? sevenDayPct / 100 : 0}
         color={barColor(sevenDayPct)}
         value={isOk && sevenDayPct != null ? `${Math.round(sevenDayPct)}%` : "—"}
+        detail={isOk ? formatResetWindow(sevenDayResetsAt) : null}
       />
     </div>
   );
+}
+
+function accountDisplayLabel(acct: LidCodeClaudeAccount): string {
+  if (acct.label && acct.label.trim().length > 0) return acct.label;
+  return acct.key.replaceAll("-", " ").toUpperCase();
 }
 
 /**
@@ -827,9 +872,11 @@ function ClaudeAccountsBand({
         accounts.map((acct) => (
           <ClaudeAccountBlock
             key={acct.key}
-            label={acct.key}
+            label={accountDisplayLabel(acct)}
             fiveHourPct={acct.five_hour_utilization}
             sevenDayPct={acct.seven_day_utilization}
+            fiveHourResetsAt={acct.five_hour_resets_at}
+            sevenDayResetsAt={acct.seven_day_resets_at}
             isActive={acct.is_active}
             accountStatus={acct.status}
           />

@@ -13,6 +13,24 @@ final class PanelGeometryTest: XCTestCase {
         PanelGeometry.frame(topLeft: topLeft, width: width, height: height)
     }
 
+    func testTallContentFitsAboveDockWithoutMovingTopEdge() {
+        let height = PanelGeometry.visibleHeight(
+            contentHeight: 1400, topY: 900, screenMinY: 80, inset: 8)
+        XCTAssertEqual(height, 812)
+        XCTAssertEqual(frame(height).minY, 88)
+        XCTAssertEqual(frame(height).maxY, 900)
+    }
+
+    func testShortContentKeepsNaturalHeight() {
+        XCTAssertEqual(PanelGeometry.visibleHeight(
+            contentHeight: 300, topY: 900, screenMinY: 80, inset: 8), 300)
+    }
+
+    func testHeightLimitUsesSecondaryScreenCoordinates() {
+        XCTAssertEqual(PanelGeometry.visibleHeight(
+            contentHeight: 1400, topY: -100, screenMinY: -900, inset: 8), 792)
+    }
+
     /// The load-bearing property. AppKit's origin is the *bottom*-left corner, so
     /// holding the top still means moving the origin down by exactly the growth.
     func testTopEdgeNeverMovesWhenHeightChanges() {

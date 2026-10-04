@@ -47,10 +47,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var isWakeHandlerRunning = false
 
     func applicationDidFinishLaunching(_ notification: Notification) {
+        if let index = CommandLine.arguments.firstIndex(of: "--render-preview"),
+           CommandLine.arguments.indices.contains(index + 1) {
+            do { try DashboardPreview.render(to: URL(fileURLWithPath: CommandLine.arguments[index + 1])) }
+            catch { fputs("Preview failed: \(error)\n", stderr); exit(1) }
+            NSApplication.shared.terminate(nil)
+            return
+        }
+        let isFirstLaunch = !FileManager.default.fileExists(atPath: AIProfileStore.url.path)
         model.start()
         installStatusItem()
         installPanel()
         installSleepWakeObservers()
+        if isFirstLaunch { panelController?.show(relativeTo: statusItem?.button) }
     }
 
     func applicationWillTerminate(_ notification: Notification) {
@@ -120,28 +129,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             //   2. Active account unknown, not "ok", or no per-account data →
             //      the top-level summary window (back-compat, preserves old behaviour).
             if let usage = snapshot.usage {
-                // readStorageDir() returns String??:
-                //   nil          → detection failed (ps timed out, no claude process)
-                //   .some(nil)   → newest process has no env var → default account (storageDir nil)
-                //   .some(path)  → newest process carries CLAUDE_SECURESTORAGE_CONFIG_DIR=path
-                let detectedDir: String?? = ActiveClaudeAccountReader.readStorageDir()
-                let pct: Int
-                if let activeConfigDir = detectedDir {
-                    // A process was found. Match by storageDir (nil for default, path for non-default).
-                    let matched = usage.accounts.first { $0.storageDir == activeConfigDir }
-                    if let acct = matched, acct.status == "ok", let fh = acct.fiveHour {
-                        pct = Int(fh.utilization.rounded())
-                    } else {
-                        pct = Int(usage.fiveHour.utilization.rounded())
-                    }
-                } else {
-                    // Detection failed — ps timed out or no claude process is running.
-                    pct = Int(usage.fiveHour.utilization.rounded())
+                let detected: String?? = ActiveClaudeAccountReader.readStorageDir()
+                let readable = usage.accounts.filter { $0.status == "ok" && $0.fiveHour != nil }
+                let activeClaude = detected.flatMap { directory in
+                    readable.first { $0.provider == "claude" && $0.storageDir == directory }
                 }
-                percentText = "\(pct)%"
-            } else {
-                percentText = nil
-            }
+                let account = activeClaude ?? readable.first { $0.provider == "codex" && $0.isActive } ?? readable.first
+                if let account, let window = account.fiveHour,
+                   account.asOf.map({ Date().timeIntervalSince($0) <= ClaudeUsageReader.staleAfterSecond }) ?? !usage.isStale {
+                    percentText = "\(Int(window.utilization.rounded()))%"
+                } else { percentText = nil }
+            } else { percentText = nil }
 
             // Session count badges (C7-C10)
             let sessions = snapshot.agentSession.sessions

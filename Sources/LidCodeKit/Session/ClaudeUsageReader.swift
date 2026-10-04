@@ -36,13 +36,21 @@ public struct UsageWindow: Codable, Sendable, Equatable {
 /// Usage data for one rate-limited coding account.
 ///
 /// The fetcher runs per-account and the reader preserves producer order — ADVO
-/// first, then PRINCE, then CODEX — so the UI can render them in a stable, predictable sequence
-/// without sorting by key or label.
+/// CLAUDE, PRINCE CLAUDE, ADVO CODEX, then PRINCE CODEX — so the UI can render
+/// them in a stable, predictable sequence without sorting by key or label.
 public struct ClaudeAccountUsage: Codable, Sendable, Equatable {
     /// Short machine-readable key, e.g. "advo" or "prince".
     public var key: String
-    /// Display name, e.g. "ADVO" or "PRINCE".
+    /// Display name, e.g. "ADVO CLAUDE" or "PRINCE CODEX".
     public var label: String
+    /// "claude" or "codex". This prevents a Codex row with a nil storage path
+    /// from being mistaken for the default Claude account.
+    public var provider: String
+    /// True for the Codex profile whose local auth/session activity is newest.
+    /// Claude's active row is still detected from the live Claude process.
+    public var isActive: Bool
+    /// Last local Codex login/session activity, when the producer can determine it.
+    public var lastUsedAt: Date?
     /// "ok" | "signed_out" | "expired" | "error" — passed through so a new status
     /// from the producer degrades to an unfamiliar string rather than crashing.
     public var status: String
@@ -73,6 +81,9 @@ public struct ClaudeAccountUsage: Codable, Sendable, Equatable {
     public init(
         key: String,
         label: String,
+        provider: String = "claude",
+        isActive: Bool = false,
+        lastUsedAt: Date? = nil,
         status: String,
         fiveHour: UsageWindow? = nil,
         sevenDay: UsageWindow? = nil,
@@ -84,6 +95,9 @@ public struct ClaudeAccountUsage: Codable, Sendable, Equatable {
     ) {
         self.key = key
         self.label = label
+        self.provider = provider
+        self.isActive = isActive
+        self.lastUsedAt = lastUsedAt
         self.status = status
         self.fiveHour = fiveHour
         self.sevenDay = sevenDay
@@ -100,6 +114,10 @@ public struct ClaudeAccountUsage: Codable, Sendable, Equatable {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         key = try container.decodeIfPresent(String.self, forKey: .key) ?? ""
         label = try container.decodeIfPresent(String.self, forKey: .label) ?? ""
+        let inferredProvider = (key == "codex" || key.hasSuffix("-codex")) ? "codex" : "claude"
+        provider = try container.decodeIfPresent(String.self, forKey: .provider) ?? inferredProvider
+        isActive = try container.decodeIfPresent(Bool.self, forKey: .isActive) ?? false
+        lastUsedAt = try container.decodeIfPresent(Date.self, forKey: .lastUsedAt)
         status = try container.decodeIfPresent(String.self, forKey: .status) ?? "error"
         fiveHour = try container.decodeIfPresent(UsageWindow.self, forKey: .fiveHour)
         sevenDay = try container.decodeIfPresent(UsageWindow.self, forKey: .sevenDay)
@@ -130,7 +148,8 @@ public struct ClaudeUsage: Codable, Sendable, Equatable {
     public var fetchedAt: Date
     /// true when `fetchedAt` is older than `staleAfterSecond`.
     public var isStale: Bool
-    /// One entry per account in producer order (ADVO, PRINCE, then CODEX). Empty only when the
+    /// One entry per account in producer order (ADVO CLAUDE, PRINCE CLAUDE,
+    /// ADVO CODEX, PRINCE CODEX). Empty only when the
     /// file predates the multi-account format and synthesis failed for some reason — the
     /// UI falls back to the top-level windows in that case.
     public var accounts: [ClaudeAccountUsage]
@@ -152,23 +171,26 @@ public struct ClaudeUsage: Codable, Sendable, Equatable {
     }
 }
 
-/// Reads the usage snapshot a launchd agent rewrites every five minutes.
+/// Reads the native usage snapshot, with the legacy collector as a fallback.
 ///
-/// This process never calls Anthropic itself — it only reads a file someone else
-/// maintains, which is why a missing or malformed file is silence rather than an error.
+/// Collection is isolated in AIUsageCollector; runtime ticks only read the snapshot.
 public enum ClaudeUsageReader {
     /// Three times the producer's five-minute cadence: one missed refresh is a blip
     /// worth tolerating, two in a row means the fetcher is genuinely broken.
     public static let staleAfterSecond: TimeInterval = 900
 
-    /// Written by `com.warp-monitor.fetch-usage`. Outside the home directory by design
-    /// — it is scratch state that should not survive a reboot.
-    public static let usageURL = URL(fileURLWithPath: "/tmp/warp-monitor-usage.json")
+    /// Native snapshots live in the user’s private Lidcode directory.
+    /// A legacy /tmp snapshot is read only when no native snapshot exists.
+    public static var usageURL: URL {
+        FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".lidcode/usage.json")
+    }
+    public static let legacyUsageURL = URL(fileURLWithPath: "/tmp/warp-monitor-usage.json")
     public static let errorURL = URL(fileURLWithPath: "/tmp/warp-monitor-usage-error.txt")
 
     private static let lock = NSLock()
     private static var cachedUsage: ClaudeUsage?
     private static var cachedModifiedAt: Date?
+    private static var cachedSourceURL: URL?
 
     /// Called on the runtime's 5s tick against a file that changes every 5 minutes, so
     /// the JSON is parsed on roughly one call in sixty.
@@ -176,15 +198,17 @@ public enum ClaudeUsageReader {
         lock.lock()
         defer { lock.unlock() }
 
-        guard let attribute = try? FileManager.default.attributesOfItem(atPath: usageURL.path) else {
+        let sourceURL = FileManager.default.fileExists(atPath: usageURL.path) ? usageURL : legacyUsageURL
+        guard let attribute = try? FileManager.default.attributesOfItem(atPath: sourceURL.path) else {
             cachedUsage = nil
             cachedModifiedAt = nil
             return nil
         }
         let modifiedAt = attribute[.modificationDate] as? Date
-        if cachedUsage == nil || modifiedAt != cachedModifiedAt {
+        if cachedUsage == nil || modifiedAt != cachedModifiedAt || cachedSourceURL != sourceURL {
+            cachedSourceURL = sourceURL
             cachedModifiedAt = modifiedAt
-            cachedUsage = (try? Data(contentsOf: usageURL)).flatMap { parse($0, asOf: now) }
+            cachedUsage = (try? Data(contentsOf: sourceURL)).flatMap { parse($0, asOf: now) }
         }
         // Recomputed on every read, cache hit or not: both derived values are relative
         // to the clock, not to the file.
@@ -235,6 +259,8 @@ public enum ClaudeUsageReader {
         struct AccountPayload: Decodable {
             var key: String
             var label: String
+            var provider: String?
+            var isActive: Bool?
             var status: String
             var severity: String?
             var storageDir: String?
@@ -243,6 +269,7 @@ public enum ClaudeUsageReader {
             /// When this account's numbers were actually read. Absent in files written
             /// before the fetcher gained its carry-forward behaviour.
             var asOf: String?
+            var lastUsedAt: String?
             var carried: Bool?
             var degraded: String?
         }
@@ -271,6 +298,9 @@ public enum ClaudeUsageReader {
                 return ClaudeAccountUsage(
                     key: raw.key,
                     label: raw.label,
+                    provider: raw.provider ?? ((raw.key == "codex" || raw.key.hasSuffix("-codex")) ? "codex" : "claude"),
+                    isActive: raw.isActive ?? false,
+                    lastUsedAt: raw.lastUsedAt.flatMap(date(fromIso:)),
                     status: raw.status,
                     fiveHour: fh,
                     sevenDay: sd,
@@ -289,8 +319,9 @@ public enum ClaudeUsageReader {
             let fh = window(payload.fiveHour, asOf: now)
             let sd = window(payload.sevenDay, asOf: now)
             accounts = [ClaudeAccountUsage(
-                key: "prince",
-                label: "PRINCE",
+                key: "default-claude",
+                label: "Claude",
+                provider: "claude",
                 status: "ok",
                 fiveHour: fh,
                 sevenDay: sd,

@@ -1,30 +1,7 @@
 import SwiftUI
 import LidCodeKit
 
-/// Six things, in this order: what state the Mac is in, the switch that changes it, the
-/// two readings that can end a hold, memory pressure (display-only), the two windows that
-/// decide whether starting a hold is worth anything, and the settings drawer.
-///
-/// Everything else that used to be here is gone. The panel had grown to eight sections —
-/// activity log, lease list, sparkline, timer bar, agent roster, health report, three
-/// rings, two more rings — and each was defensible on its own while the set was
-/// unreadable: a menu-bar dropdown you open for four seconds cannot ask you to triage a
-/// dashboard. Most of what was cut is not lost, it is *elsewhere*: the lease list is
-/// `lidcode lease`, the log is `lidcode log`, the health sweep is `lidcode health`, and
-/// the long explanations now live in `.help` tooltips, which cost no vertical space and
-/// are read by exactly the person who wants them.
-///
-/// What survived is the answer to "is my Mac going to stay awake, and what would stop
-/// it". Battery and heat can stop it. Claude's rate limits cannot stop it but decide
-/// whether the run is worth starting: an overnight job against a 98%-consumed weekly
-/// window is eight hours of keeping a Mac awake to be told no.
-///
-/// Memory pressure is shown as a reading, not a guard. It can indicate that the machine
-/// is under strain during a long run — a useful signal for deciding whether to start or
-/// continue a hold — but LidCode never ends a hold on memory state alone. There is no
-/// reliable, user-configurable threshold at which high memory conclusively means the work
-/// is failing rather than the work being intensive. The section is hidden entirely when
-/// `isMemoryWarningOn` is false or when no reading is available.
+/// Lidcode controls alongside the OpenUsage-style provider dashboard.
 struct MenuView: View {
     @ObservedObject var model: AppModel
 
@@ -32,34 +9,59 @@ struct MenuView: View {
     private var setting: Setting { model.setting }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            header
-            control
-            warningRow        // G1-G3: hardware-state driven warnings
-            meterSection
-            memorySection
-            usageSection
-            // Duration slider moved here from settings drawer (J5).
-            sliderSection
-            sessionSection    // C1, C2, C11: grouped session list at the bottom
-            foreignBlockerRow // C12: other apps blocking sleep
-            // The panel's only divider, and it earns its place: everything above is a
-            // readout or the one switch, everything below is configuration. The six
-            // dividers this replaces were separating things that were already separated
-            // by whitespace, which is how a small panel ends up looking like a form.
-            Divider()
-            SettingSection(model: model, isExpanded: $model.isSettingExpanded)
-            // Pins the content to the top of whatever height the window happens to be.
-            Spacer(minLength: 0)
+        VStack(spacing: 0) {
+            content
+            DashboardFooter(model: model)
+        }.frame(width: DashboardTheme.width).background(DashboardTheme.tray)
+    }
+
+    var content: some View {
+        VStack(spacing: 0) {
+            if model.screen != .dashboard { navigationBar }
+            VStack(alignment: .leading, spacing: 14) {
+                switch model.screen {
+                case .dashboard:
+                    ProviderDashboard(model: model)
+                    VStack(alignment: .leading, spacing: 10) {
+                        header
+                        control
+                        warningRow
+                        sliderSection
+                        meterSection
+                    }.padding(14).dashboardCard()
+                    sessionSection
+                    foreignBlockerRow
+                case .customize:
+                    CustomizeProviders(model: model)
+                case .settings:
+                    SettingSection(model: model, isExpanded: .constant(true))
+                        .padding(14).dashboardCard()
+                    memorySection
+                    Button("Install lidcode command") { model.installCLI() }
+                        .buttonStyle(.bordered)
+                    if let message = model.cliInstallMessage {
+                        Text(message).font(.system(size: 11)).foregroundStyle(.secondary)
+                    }
+                    Link("Downloads & setup", destination: URL(string: "https://github.com/princewagan/lidcode/releases/latest")!)
+                        .font(.system(size: 12))
+                }
+            }.padding(14)
         }
-        .padding(14)
-        .frame(width: 340)
-        // Smoothness (J1-J4): replace the blanket animation kill with targeted stability.
-        // Layout uses fixed heights and monospacedDigit fonts on numbers so digits never
-        // cause reflow. Short animations on colour/label transitions (0.15s ease-out)
-        // are applied per-element. The slider manages its own drag state locally.
-        // The blanket `.transaction { $0.animation = nil }` is removed; individual
-        // rows that must not animate (like window-resize paths) are marked separately.
+        .frame(width: DashboardTheme.width)
+        .background(DashboardTheme.tray)
+    }
+
+    private var navigationBar: some View {
+        ZStack {
+            Text(model.screen == .customize ? "Customize" : "Settings")
+                .font(.system(size: 14, weight: .semibold))
+            HStack {
+                Button { model.screen = .dashboard } label: {
+                    Image(systemName: "chevron.backward").frame(width: 24, height: 24)
+                }.buttonStyle(.borderless).help("Back").accessibilityLabel("Back")
+                Spacer()
+            }
+        }.padding(.horizontal, 14).frame(height: 44).background(.regularMaterial)
     }
 
     // MARK: - Header (C3, C4)
@@ -407,121 +409,6 @@ struct MenuView: View {
             return String(format: "%.2f GB", megabyte / 1024)
         }
         return "\(Int(megabyte.rounded())) MB"
-    }
-
-    // MARK: - Claude usage
-
-    @ViewBuilder
-    private var usageSection: some View {
-        if let usage = snapshot.usage {
-            // Render one block per account in producer order (ADVO, PRINCE, then CODEX).
-            // Falling back to the single-block path when accounts is empty means an old
-            // file format never causes a blank panel.
-            //
-            // Detect the active account so the corresponding block can be labelled.
-            // readStorageDir() returns String?? — nil means detection failed, .some(nil)
-            // means the default account is active, .some(path) means a non-default account.
-            let detectedDir: String?? = ActiveClaudeAccountReader.readStorageDir()
-            if usage.accounts.isEmpty {
-                usageBlock(
-                    label: "Claude",
-                    trailing: usage.isStale ? "stale" : usage.fiveHour.resetDisplay.map { "resets in \($0)" },
-                    fiveHour: usage.fiveHour,
-                    sevenDay: usage.sevenDay,
-                    isStale: usage.isStale,
-                    accountStatus: "ok",
-                    isActive: false)
-            } else {
-                ForEach(usage.accounts, id: \.key) { acct in
-                    // A carried-forward reading says how old it is, in place of the reset
-                    // countdown. The fetcher reuses the last good numbers when a poll
-                    // fails, which is what stopped a dropped connection from blanking the
-                    // row — but numbers reused without a date on them are a quiet lie.
-                    let trailing: String? = acct.carriedAgeDisplay()
-                        .map { "from \($0)" }
-                        ?? (usage.isStale
-                            ? "stale"
-                            : acct.fiveHour?.resetDisplay.map { "resets in \($0)" })
-                    // An account is active when detection succeeded and its storageDir
-                    // matches the detected config dir (nil matches the default account).
-                    let isActive: Bool = {
-                        guard let configDir = detectedDir else { return false }
-                        return acct.storageDir == configDir
-                    }()
-                    usageBlock(
-                        label: acct.label,
-                        trailing: trailing,
-                        fiveHour: acct.fiveHour,
-                        sevenDay: acct.sevenDay,
-                        isStale: usage.isStale,
-                        accountStatus: acct.status,
-                        isActive: isActive)
-                }
-            }
-        }
-    }
-
-    /// One labelled pair of bars for a single account.
-    ///
-    /// When the account is not "ok" the bars are greyed at 0 and a short status
-    /// phrase replaces the reset-countdown — the row still appears so the user knows
-    /// the account exists and what state it is in.
-    ///
-    /// When `isActive` is true, "active" is appended to the trailing label so the user
-    /// can tell at a glance which account the menu bar number refers to.
-    @ViewBuilder
-    private func usageBlock(
-        label: String,
-        trailing: String?,
-        fiveHour: UsageWindow?,
-        sevenDay: UsageWindow?,
-        isStale: Bool,
-        accountStatus: String,
-        isActive: Bool
-    ) -> some View {
-        let isOk = accountStatus == "ok"
-        // Status phrase shown instead of bars for non-ok accounts.
-        let statusPhrase: String? = {
-            switch accountStatus {
-            case "ok":          return nil
-            case "signed_out":  return "signed out"
-            case "expired":     return "needs login"
-            default:            return "error"
-            }
-        }()
-
-        // Build the trailing label: append "active" alongside the reset countdown or
-        // status phrase. The countdown is the most useful thing on an ok account, so it
-        // stays primary; "active" appears after a separator so neither displaces the other.
-        let trailingWithActive: String? = {
-            let base = isOk ? trailing : statusPhrase
-            guard isActive else { return base }
-            if let base { return "\(base) · active" }
-            return "active"
-        }()
-
-        VStack(alignment: .leading, spacing: 6) {
-            SectionLabel(text: label, trailing: trailingWithActive)
-            usageBar("5-hour", fiveHour, isStale: isStale, isOk: isOk)
-            usageBar("1-week", sevenDay, isStale: isStale, isOk: isOk)
-        }
-    }
-
-    private func usageBar(_ label: String, _ window: UsageWindow?, isStale: Bool, isOk: Bool = true) -> some View {
-        let fraction = (isOk ? window?.fraction : nil) ?? 0
-        let utilization = (isOk ? window?.utilization : nil) ?? 0
-        let resetDisplay = window?.resetDisplay
-        return BarGauge(
-            label: label,
-            fraction: fraction,
-            color: (!isOk || isStale) ? Palette.brandSoft : Palette.usageColor(percent: utilization),
-            value: isOk ? "\(Int(utilization.rounded()))%" : "—"
-        )
-        .help(isStale
-              ? "Last read over five minutes ago — the usage file has not refreshed"
-              : (!isOk
-                 ? "Account unavailable"
-                 : resetDisplay.map { "Resets in \($0)" } ?? "Reset time unknown"))
     }
 
     // MARK: - Duration slider (J5: moved from settings drawer to main panel)

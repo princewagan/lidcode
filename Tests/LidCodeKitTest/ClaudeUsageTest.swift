@@ -216,8 +216,8 @@ final class ClaudeUsageReaderFileTest: XCTestCase {
 // Multi-account format tests
 // ---------------------------------------------------------------------------
 
-/// A multi-account payload with all three counters ok, in producer order
-/// (advo, prince, codex).
+/// A multi-account payload with all four counters ok, in producer order
+/// (ADVO CLAUDE, PRINCE CLAUDE, ADVO CODEX, PRINCE CODEX).
 private let multiAccountPayload = Data("""
 {
   "fetched_at": "2026-08-31T00:00:00Z",
@@ -227,7 +227,7 @@ private let multiAccountPayload = Data("""
   "accounts": [
     {
       "key": "advo",
-      "label": "ADVO",
+      "label": "ADVO CLAUDE",
       "status": "ok",
       "severity": "normal",
       "five_hour": { "utilization": 8.0,  "resets_at": "2026-08-31T05:00:00.000000+00:00" },
@@ -235,19 +235,33 @@ private let multiAccountPayload = Data("""
     },
     {
       "key": "prince",
-      "label": "PRINCE",
+      "label": "PRINCE CLAUDE",
       "status": "ok",
       "severity": "warning",
       "five_hour": { "utilization": 72.0, "resets_at": "2026-08-31T05:00:00.000000+00:00" },
       "seven_day": { "utilization": 88.0, "resets_at": "2026-09-07T00:00:00.000000+00:00" }
     },
     {
-      "key": "codex",
-      "label": "CODEX",
+      "key": "advo-codex",
+      "label": "ADVO CODEX",
+      "provider": "codex",
+      "is_active": false,
+      "last_used_at": "2026-08-30T23:00:00Z",
       "status": "ok",
       "severity": "normal",
       "five_hour": { "utilization": 31.0, "resets_at": "2026-08-31T03:00:00Z" },
       "seven_day": { "utilization": 54.0, "resets_at": "2026-09-05T00:00:00Z" }
+    },
+    {
+      "key": "prince-codex",
+      "label": "PRINCE CODEX",
+      "provider": "codex",
+      "is_active": true,
+      "last_used_at": "2026-08-31T00:30:00Z",
+      "status": "ok",
+      "severity": "normal",
+      "five_hour": { "utilization": 69.0, "resets_at": "2026-08-31T04:00:00Z" },
+      "seven_day": { "utilization": 11.0, "resets_at": "2026-09-05T00:00:00Z" }
     }
   ]
 }
@@ -272,7 +286,7 @@ private let noTopLevelWindowsPayload = Data("""
   "accounts": [
     {
       "key": "advo",
-      "label": "ADVO",
+      "label": "ADVO CLAUDE",
       "status": "ok",
       "severity": "normal",
       "five_hour": { "utilization": 8.0,  "resets_at": "2026-08-31T05:00:00.000000+00:00" },
@@ -280,7 +294,7 @@ private let noTopLevelWindowsPayload = Data("""
     },
     {
       "key": "prince",
-      "label": "PRINCE",
+      "label": "PRINCE CLAUDE",
       "status": "signed_out"
     }
   ]
@@ -295,17 +309,19 @@ final class ClaudeAccountUsageParseTest: XCTestCase {
 
     func testMultiAccountParsePreservesProducerOrder() throws {
         let usage = try XCTUnwrap(ClaudeUsageReader.parse(multiAccountPayload, asOf: multiAccountFetchedAt))
-        XCTAssertEqual(usage.accounts.count, 3)
+        XCTAssertEqual(usage.accounts.count, 4)
         XCTAssertEqual(usage.accounts[0].key, "advo")
         XCTAssertEqual(usage.accounts[1].key, "prince")
-        XCTAssertEqual(usage.accounts[2].key, "codex")
+        XCTAssertEqual(usage.accounts[2].key, "advo-codex")
+        XCTAssertEqual(usage.accounts[3].key, "prince-codex")
     }
 
     func testMultiAccountParseDecodesLabels() throws {
         let usage = try XCTUnwrap(ClaudeUsageReader.parse(multiAccountPayload, asOf: multiAccountFetchedAt))
-        XCTAssertEqual(usage.accounts[0].label, "ADVO")
-        XCTAssertEqual(usage.accounts[1].label, "PRINCE")
-        XCTAssertEqual(usage.accounts[2].label, "CODEX")
+        XCTAssertEqual(usage.accounts[0].label, "ADVO CLAUDE")
+        XCTAssertEqual(usage.accounts[1].label, "PRINCE CLAUDE")
+        XCTAssertEqual(usage.accounts[2].label, "ADVO CODEX")
+        XCTAssertEqual(usage.accounts[3].label, "PRINCE CODEX")
     }
 
     func testMultiAccountParseDecodesStatuses() throws {
@@ -313,16 +329,34 @@ final class ClaudeAccountUsageParseTest: XCTestCase {
         XCTAssertEqual(usage.accounts[0].status, "ok")
         XCTAssertEqual(usage.accounts[1].status, "ok")
         XCTAssertEqual(usage.accounts[2].status, "ok")
+        XCTAssertEqual(usage.accounts[3].status, "ok")
     }
 
     func testMultiAccountParseDecodesUtilization() throws {
         let usage = try XCTUnwrap(ClaudeUsageReader.parse(multiAccountPayload, asOf: multiAccountFetchedAt))
         let advoUtil = try XCTUnwrap(usage.accounts[0].fiveHour).utilization
         let princeUtil = try XCTUnwrap(usage.accounts[1].fiveHour).utilization
-        let codexUtil = try XCTUnwrap(usage.accounts[2].fiveHour).utilization
+        let advoCodexUtil = try XCTUnwrap(usage.accounts[2].fiveHour).utilization
+        let princeCodexUtil = try XCTUnwrap(usage.accounts[3].fiveHour).utilization
         XCTAssertEqual(advoUtil, 8.0, accuracy: 0.001)
         XCTAssertEqual(princeUtil, 72.0, accuracy: 0.001)
-        XCTAssertEqual(codexUtil, 31.0, accuracy: 0.001)
+        XCTAssertEqual(advoCodexUtil, 31.0, accuracy: 0.001)
+        XCTAssertEqual(princeCodexUtil, 69.0, accuracy: 0.001)
+    }
+
+    func testMultiAccountParseSeparatesClaudeAndCodexProviders() throws {
+        let usage = try XCTUnwrap(ClaudeUsageReader.parse(multiAccountPayload, asOf: multiAccountFetchedAt))
+        XCTAssertEqual(usage.accounts[0].provider, "claude")
+        XCTAssertEqual(usage.accounts[1].provider, "claude")
+        XCTAssertEqual(usage.accounts[2].provider, "codex")
+        XCTAssertEqual(usage.accounts[3].provider, "codex")
+    }
+
+    func testMultiAccountParseDecodesCodexActivityMarkerAndTimestamp() throws {
+        let usage = try XCTUnwrap(ClaudeUsageReader.parse(multiAccountPayload, asOf: multiAccountFetchedAt))
+        XCTAssertFalse(usage.accounts[2].isActive)
+        XCTAssertTrue(usage.accounts[3].isActive)
+        XCTAssertEqual(usage.accounts[3].lastUsedAt, Date(timeIntervalSince1970: 1_788_136_200))
     }
 
     func testMultiAccountParseDecodesSeverityPerAccount() throws {
@@ -333,12 +367,12 @@ final class ClaudeAccountUsageParseTest: XCTestCase {
 
     // MARK: - Old-format back-compat
 
-    func testOldFormatWithoutAccountsKeyParsesAndSynthesisesPrinceAccount() throws {
+    func testOldFormatWithoutAccountsKeyParsesAndSynthesisesDefaultAccount() throws {
         let usage = try XCTUnwrap(ClaudeUsageReader.parse(oldFormatPayload,
                                                           asOf: Date(timeIntervalSince1970: 1_787_763_445)))
         XCTAssertEqual(usage.accounts.count, 1)
-        XCTAssertEqual(usage.accounts[0].key, "prince")
-        XCTAssertEqual(usage.accounts[0].label, "PRINCE")
+        XCTAssertEqual(usage.accounts[0].key, "default-claude")
+        XCTAssertEqual(usage.accounts[0].label, "Claude")
         XCTAssertEqual(usage.accounts[0].status, "ok")
         let fhUtil = try XCTUnwrap(usage.accounts[0].fiveHour).utilization
         let sdUtil = try XCTUnwrap(usage.accounts[0].sevenDay).utilization
@@ -390,7 +424,7 @@ final class ClaudeAccountUsageParseTest: XCTestCase {
         {
           "fetched_at": "2026-08-31T00:00:00Z",
           "accounts": [
-            { "key": "advo", "label": "ADVO", "status": "error", "error": "timeout" }
+            { "key": "advo", "label": "ADVO CLAUDE", "status": "error", "error": "timeout" }
           ]
         }
         """.utf8)
@@ -404,7 +438,7 @@ final class ClaudeAccountUsageParseTest: XCTestCase {
         {
           "fetched_at": "2026-08-31T00:00:00Z",
           "accounts": [
-            { "key": "prince", "label": "PRINCE", "status": "expired" }
+            { "key": "prince", "label": "PRINCE CLAUDE", "status": "expired" }
           ]
         }
         """.utf8)

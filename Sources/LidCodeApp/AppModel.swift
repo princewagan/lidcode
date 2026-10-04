@@ -20,6 +20,99 @@ final class AppModel: ObservableObject {
     /// activity, settings — and each disclosure was a section that had to be read past
     /// to reach the switch. The other three sections are gone; see `MenuView`.
     @Published var isSettingExpanded = false
+    @Published var screen: DashboardScreen = .dashboard
+    @Published private(set) var profiles: [AIProfile] = []
+    @Published private(set) var isRefreshingUsage = false
+    @Published private(set) var profileError: String?
+    @Published private(set) var lastUsageRefresh: Date?
+    private var usageTask: Task<Void, Never>?
+    private var usageTimer: Task<Void, Never>?
+    private var usageGeneration = 0
+
+    enum DashboardScreen { case dashboard, customize, settings }
+    @Published private(set) var cliInstallMessage: String?
+
+    func installCLI() {
+        guard let source = Optional(Bundle.main.bundleURL.appendingPathComponent("Contents/Helpers/lidcode")),
+              FileManager.default.isExecutableFile(atPath: source.path) else {
+            cliInstallMessage = "CLI missing. Download the complete Lidcode app bundle."
+            return
+        }
+        let directory = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".local/bin")
+        let target = directory.appendingPathComponent("lidcode")
+        do {
+            try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+            // Preserve an unrelated executable rather than silently overwriting it.
+            if FileManager.default.fileExists(atPath: target.path) || (try? FileManager.default.destinationOfSymbolicLink(atPath: target.path)) != nil {
+                guard (try? FileManager.default.destinationOfSymbolicLink(atPath: target.path)) != nil else {
+                    cliInstallMessage = "~/.local/bin/lidcode already exists. Move it before installing."
+                    return
+                }
+                try FileManager.default.removeItem(at: target)
+            }
+            try FileManager.default.createSymbolicLink(at: target, withDestinationURL: source)
+            cliInstallMessage = "Installed in ~/.local/bin. Add that folder to your shell PATH."
+        } catch { cliInstallMessage = "Could not install CLI: \(error.localizedDescription)" }
+    }
+
+
+    /// Render fixtures only: never starts the runtime or reads credentials.
+    func configurePreview(empty: Bool = false) {
+        profiles = empty ? [] : [AIProfile(id: "preview-claude", provider: .claude, name: "Claude"),
+                                 AIProfile(id: "preview-codex", provider: .codex, name: "Codex")]
+        let now = Date()
+        let accounts = profiles.enumerated().map { index, profile in
+            ClaudeAccountUsage(key: profile.id, label: profile.name, provider: profile.provider.rawValue,
+                              status: "ok", fiveHour: UsageWindow(utilization: index == 0 ? 24 : 42, resetsAt: now.addingTimeInterval(9300)),
+                              sevenDay: UsageWindow(utilization: index == 0 ? 61 : 18, resetsAt: now.addingTimeInterval(374400)), asOf: now)
+        }
+        snapshot.usage = ClaudeUsage(fiveHour: UsageWindow(utilization: 24, resetsAt: nil),
+                                    sevenDay: UsageWindow(utilization: 61, resetsAt: nil),
+                                    severity: "normal", fetchedAt: now, isStale: false, accounts: accounts)
+        lastUsageRefresh = now
+    }
+
+    func loadProfiles() {
+        do {
+            if FileManager.default.fileExists(atPath: AIProfileStore.url.path) {
+                profiles = try AIProfileStore.load()
+            } else {
+                profiles = AIProfileStore.detectedDefaults()
+                try AIProfileStore.save(profiles)
+            }
+        } catch { profileError = "Could not load AI profiles. Check ~/.lidcode/ai-profiles.json." }
+    }
+
+    func saveProfiles(_ next: [AIProfile]) {
+        do {
+            try AIProfileStore.save(next)
+            profiles = next
+            profileError = nil
+            refreshUsage()
+        } catch { profileError = "Could not save profiles. Use a name and an absolute profile path." }
+    }
+
+    func refreshUsage() {
+        usageTask?.cancel()
+        usageGeneration += 1
+        let generation = usageGeneration
+        let configured = profiles
+        let previous = snapshot.usage
+        isRefreshingUsage = true
+        usageTask = Task { [weak self] in
+            let result = await Task.detached(priority: .utility) {
+                await AIUsageCollector.collect(configured, previous: previous)
+            }.value
+            guard let self, !Task.isCancelled, self.usageGeneration == generation else { return }
+            do {
+                try AIUsageCollector.write(result)
+                self.snapshot.usage = result
+                self.lastUsageRefresh = result.fetchedAt
+            } catch { self.profileError = "Could not save usage. Check ~/.lidcode permissions." }
+            self.isRefreshingUsage = false
+        }
+    }
+
 
     /// `nonisolated` on purpose: the runtime is internally queue-confined and safe to
     /// call from any thread, and the CLI socket handler must reach it without hopping
@@ -65,7 +158,16 @@ final class AppModel: ObservableObject {
     }
 
     func start() {
+        loadProfiles()
         runtime.start()
+        refreshUsage()
+        usageTimer = Task { [weak self] in
+            while !Task.isCancelled {
+                try? await Task.sleep(nanoseconds: 300_000_000_000)
+                guard !Task.isCancelled, let self else { return }
+                if !self.isRefreshingUsage { self.refreshUsage() }
+            }
+        }
         startServer()
         UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .sound]) { _, _ in }
         snapshot = runtime.snapshot
@@ -76,6 +178,8 @@ final class AppModel: ObservableObject {
     /// Wired to app termination. Anything turned on must come back off here — the
     /// helper's deadman switch is the backstop, not the plan.
     func shutdown() {
+        usageTask?.cancel()
+        usageTimer?.cancel()
         server?.stop()
         runtime.shutdown()
     }

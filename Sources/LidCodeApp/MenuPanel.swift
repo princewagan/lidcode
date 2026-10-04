@@ -29,7 +29,10 @@ final class MenuPanel: NSPanel {
 @MainActor
 final class MenuPanelController: NSObject, NSWindowDelegate {
     private let panel: MenuPanel
-    private let hosting: NSHostingView<MenuView>
+    private let hosting: NSHostingView<AnyView>
+    private let footerHosting: NSHostingView<DashboardFooter>
+    private static let footerHeight: CGFloat = 52
+    private let scrollView = NSScrollView()
     private var dismissMonitor: Any?
     /// When the panel last closed, so clicking the status item to dismiss it does not
     /// immediately reopen it — the click resigns key (closing the panel) and *then*
@@ -49,7 +52,7 @@ final class MenuPanelController: NSObject, NSWindowDelegate {
     /// appear, and an item near the right edge is placed by the right-hand clamp in
     /// `topLeft(for:button:)`, so *any* width change becomes a horizontal jump. Fixing the
     /// width removes the input to that sum.
-    private static let width: CGFloat = 340
+    private static let width: CGFloat = DashboardTheme.width
     /// Fallback height when the SwiftUI layout engine has not yet measured the content.
     ///
     /// This used to be a hard `return` that aborted the entire layout pass, leaving the
@@ -72,11 +75,13 @@ final class MenuPanelController: NSObject, NSWindowDelegate {
     var isVisible: Bool { panel.isVisible }
 
     init(rootView: MenuView) {
-        hosting = NSHostingView(rootView: rootView)
-        hosting.translatesAutoresizingMaskIntoConstraints = false
+        hosting = NSHostingView(rootView: AnyView(rootView.content))
+        footerHosting = NSHostingView(rootView: DashboardFooter(model: rootView.model))
+        hosting.frame = NSRect(x: 0, y: 0, width: Self.width, height: Self.defaultHeight)
+        hosting.autoresizingMask = []
 
         panel = MenuPanel(
-            contentRect: NSRect(x: 0, y: 0, width: 340, height: 400),
+            contentRect: NSRect(x: 0, y: 0, width: Self.width, height: 400),
             styleMask: [.borderless, .nonactivatingPanel],
             backing: .buffered,
             defer: false
@@ -96,22 +101,35 @@ final class MenuPanelController: NSObject, NSWindowDelegate {
         // The rounded, blurred background the popover used to provide for free.
         let backdrop = NSVisualEffectView()
         backdrop.material = .popover
+        backdrop.layer?.backgroundColor = NSColor.textBackgroundColor.cgColor
         backdrop.blendingMode = .behindWindow
         backdrop.state = .active
         backdrop.wantsLayer = true
         backdrop.layer?.cornerRadius = Self.cornerRadius
         backdrop.layer?.cornerCurve = .continuous
         backdrop.layer?.masksToBounds = true
-        backdrop.addSubview(hosting)
+        // Keep the document at its natural height; only the viewport is screen-sized.
+        // Overlay scrollers preserve the fixed content width when overflow starts.
+        scrollView.translatesAutoresizingMaskIntoConstraints = false
+        scrollView.drawsBackground = false
+        scrollView.hasVerticalScroller = true
+        scrollView.hasHorizontalScroller = false
+        scrollView.scrollerStyle = .overlay
+        scrollView.autohidesScrollers = true
+        scrollView.documentView = hosting
+        backdrop.addSubview(scrollView)
+        footerHosting.translatesAutoresizingMaskIntoConstraints = false
+        backdrop.addSubview(footerHosting)
 
         NSLayoutConstraint.activate([
-            hosting.leadingAnchor.constraint(equalTo: backdrop.leadingAnchor),
-            hosting.trailingAnchor.constraint(equalTo: backdrop.trailingAnchor),
-            hosting.topAnchor.constraint(equalTo: backdrop.topAnchor),
-            hosting.bottomAnchor.constraint(equalTo: backdrop.bottomAnchor),
-            // Pins `fittingSize.width`, so measuring the content only ever answers the
-            // height question. See `width`.
-            hosting.widthAnchor.constraint(equalToConstant: Self.width),
+            scrollView.leadingAnchor.constraint(equalTo: backdrop.leadingAnchor),
+            scrollView.trailingAnchor.constraint(equalTo: backdrop.trailingAnchor),
+            scrollView.topAnchor.constraint(equalTo: backdrop.topAnchor),
+            scrollView.bottomAnchor.constraint(equalTo: footerHosting.topAnchor),
+            footerHosting.leadingAnchor.constraint(equalTo: backdrop.leadingAnchor),
+            footerHosting.trailingAnchor.constraint(equalTo: backdrop.trailingAnchor),
+            footerHosting.bottomAnchor.constraint(equalTo: backdrop.bottomAnchor),
+            footerHosting.heightAnchor.constraint(equalToConstant: Self.footerHeight),
         ])
         panel.contentView = backdrop
         super.init()
@@ -204,6 +222,7 @@ final class MenuPanelController: NSObject, NSWindowDelegate {
             context.duration = 0.09
             panel.animator().alphaValue = 1
         }
+        hosting.scroll(NSPoint(x: 0, y: hosting.isFlipped ? 0 : hosting.bounds.height))
         installDismissMonitor(button: button)
     }
 
@@ -255,7 +274,9 @@ final class MenuPanelController: NSObject, NSWindowDelegate {
         // a wake), the panel frame was never updated and the panel ordered front at
         // whatever stale off-screen coordinates it last had.
         let rawHeight = hosting.fittingSize.height
-        let height = rawHeight > 0 ? rawHeight : Self.defaultHeight
+        let contentHeight = rawHeight > 0 ? ceil(rawHeight) : Self.defaultHeight
+        let height = contentHeight + Self.footerHeight
+        hosting.setFrameSize(NSSize(width: Self.width, height: contentHeight))
 
         let size = NSSize(width: Self.width, height: height)
 
@@ -268,11 +289,15 @@ final class MenuPanelController: NSObject, NSWindowDelegate {
             pinnedTopLeft = computed
         }
 
-        var frame = PanelGeometry.frame(topLeft: topLeft, width: size.width, height: size.height)
-
-        // Clamp the frame so it is guaranteed to intersect a visible screen. This
-        // defends against a placement derived from a button rect or a mouse position
-        // that was valid on a since-disconnected display.
+        let targetScreen = NSScreen.screens.first { $0.frame.contains(topLeft) }
+            ?? activeScreen()
+        let visibleHeight = targetScreen.map {
+            PanelGeometry.visibleHeight(
+                contentHeight: height, topY: topLeft.y,
+                screenMinY: $0.visibleFrame.minY, inset: Self.screenInset)
+        } ?? height
+        var frame = PanelGeometry.frame(
+            topLeft: topLeft, width: size.width, height: visibleHeight)
         frame = clampedToScreen(frame)
 
         guard frame != panel.frame else { return }
@@ -287,6 +312,7 @@ final class MenuPanelController: NSObject, NSWindowDelegate {
         // centred in a box that no longer fitted it. Window and content now change in the
         // same pass, which is the only way they cannot disagree.
         panel.setFrame(frame, display: true)
+        scrollView.reflectScrolledClipView(scrollView.contentView)
     }
 
     // MARK: - Placement

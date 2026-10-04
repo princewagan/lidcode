@@ -101,10 +101,7 @@ struct DurationSlider: View {
 
                 // Filled to the centre of the knob.
                 Capsule(style: .continuous)
-                    .fill(LinearGradient(
-                        colors: [Palette.brand, Palette.brandDeep],
-                        startPoint: .leading,
-                        endPoint: .trailing))
+                    .fill(Palette.brand)
                     .frame(width: knobX + knobDiameter)
 
                 tickRow(travel: travel)

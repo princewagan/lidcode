@@ -19,6 +19,13 @@ public enum PanelGeometry {
         CGRect(x: topLeft.x, y: topLeft.y - height, width: width, height: height)
     }
 
+    /// Cap a dropdown at the bottom of the usable screen while keeping its top pinned.
+    public static func visibleHeight(
+        contentHeight: CGFloat, topY: CGFloat, screenMinY: CGFloat, inset: CGFloat
+    ) -> CGFloat {
+        min(max(0, contentHeight), max(0, topY - screenMinY - inset))
+    }
+
     /// Horizontal placement: centred under the status item, then pushed back inside the
     /// screen so an item near the right edge does not hang half the panel off it.
     public static func clampedX(

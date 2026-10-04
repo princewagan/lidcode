@@ -4,13 +4,14 @@ fetch-usage.py — write coding-assistant rate-limit usage to a file LidCode rea
 
 Reads the Anthropic OAuth credential for each configured Claude account from the
 macOS keychain using /usr/bin/security (no TCC prompt required), polls the
-Anthropic usage endpoint, reads Codex's locally-reported rate-limit snapshot,
-and writes a small JSON file to
+Anthropic usage endpoint, reads each configured Codex profile's locally-reported
+rate-limit snapshot, and writes a small JSON file to
 /tmp/warp-monitor-usage.json.
 
 No access token, refresh token, or credential blob is ever written to the output
 file, any log, or any pushed payload. Only utilisation percentages, reset
-timestamps, a severity label, and an account status leave this script.
+timestamps, a severity label, account status, and the account activity marker
+leave this script.
 
 Install:   Script/install-usage-agent.sh
 Runs as:   ~/Library/LaunchAgents/com.warp-monitor.fetch-usage.plist
@@ -124,17 +125,27 @@ NETWORK_BACKOFF_SECONDS = 2
 # Each entry: (key, label, config_dir_or_None)
 # "config_dir" is the value that would be in CLAUDE_SECURESTORAGE_CONFIG_DIR.
 # None means the default account — no suffix, no env var needed.
-ACCOUNTS = [
-    ("advo",   "ADVO",   "/Users/princewagan/.claude-advo"),
-    ("prince", "PRINCE", None),
-]
+# Optional compatibility collector. The app itself collects natively; this script
+# uses the same user-owned profiles when explicitly installed from source.
+def configured_profiles():
+    path = os.path.join(STATE_DIR, "ai-profiles.json")
+    if not os.path.exists(path):
+        return [
+            {"id": "default-claude", "provider": "claude", "name": "Claude", "directory": ""},
+            {"id": "default-codex", "provider": "codex", "name": "Codex", "directory": ""},
+        ]
+    with open(path, encoding="utf-8") as source:
+        return json.load(source)
 
-# Codex reports its current five-hour and weekly limits in its session event
-# stream. It is intentionally read locally: this keeps the collector free of
-# Codex credentials and uses the same aggregate values Codex presents to its
-# own UI. `expanduser` is important under launchd, where $HOME is still set but
-# a shell-specific CODEX_HOME often is not.
-CODEX_SESSIONS_DIR = os.path.expanduser("~/.codex/sessions")
+PROFILES = [p for p in configured_profiles() if p.get("isEnabled", True)]
+ACCOUNTS = [
+    (p["id"], p["name"], os.path.expanduser(p["directory"]) if p.get("directory") else None)
+    for p in PROFILES if p["provider"] == "claude"
+]
+CODEX_ACCOUNTS = [
+    (p["id"], p["name"], os.path.join(os.path.expanduser(p.get("directory") or "~/.codex"), "sessions"))
+    for p in PROFILES if p["provider"] == "codex"
+]
 MAX_CODEX_SESSION_FILES = 32
 CODEX_TAIL_BYTES = 1_048_576
 
@@ -566,7 +577,12 @@ def fetch_account(key: str, label: str, config_dir, as_of: str) -> dict:
       "error"      — anything else; carries a short "error" string, never a token
     """
     service = _keychain_service(config_dir)
-    base = {"key": key, "label": label, "storage_dir": config_dir}
+    base = {
+        "key": key,
+        "label": label,
+        "provider": "claude",
+        "storage_dir": config_dir,
+    }
 
     try:
         credential = read_credential(service)
@@ -632,6 +648,26 @@ def _codex_reset_at(value) -> str:
     return datetime.fromtimestamp(value, tz=timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
+def _codex_iso_timestamp(value):
+    """Parse one Codex event timestamp into a UTC Unix timestamp."""
+    if not isinstance(value, str):
+        return None
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc).timestamp()
+
+
+def _codex_activity_iso(timestamp):
+    """Format an activity timestamp for the usage JSON."""
+    if timestamp is None:
+        return None
+    return datetime.fromtimestamp(timestamp, tz=timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
 def _codex_usage_from_event(event: dict):
     """Return the two windows from one Codex token-count event, or None."""
     payload = event.get("payload")
@@ -677,6 +713,56 @@ def _recent_codex_session_files(root: str) -> list:
     return [path for _, path in candidates[:MAX_CODEX_SESSION_FILES]]
 
 
+def _codex_session_start(path: str):
+    """Read a session's start time, which is the best local login/use signal."""
+    try:
+        with open(path, "rb") as source:
+            # Codex writes session_meta first. Keep this bounded so a malformed
+            # or unexpectedly large header cannot make the five-minute poll slow.
+            for _ in range(16):
+                line = source.readline(64 * 1024)
+                if not line:
+                    break
+                try:
+                    event = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if event.get("type") == "session_meta":
+                    return _codex_iso_timestamp(event.get("timestamp"))
+    except OSError:
+        return None
+    return None
+
+
+def _codex_profile_activity(sessions_dir: str):
+    """Return the latest login/session activity for one Codex profile.
+
+    Codex does not expose a cross-profile "current account" flag. The durable
+    local signals are the auth file's `last_refresh` value (updated by
+    login/refresh), its mtime as a fallback, and the session_meta timestamp
+    (written when a CLI session starts). Taking the newer of these makes
+    switching accounts visible without reading a token.
+    """
+    latest = None
+    auth_path = os.path.join(os.path.dirname(sessions_dir), "auth.json")
+    try:
+        with open(auth_path, encoding="utf-8") as source:
+            auth = json.load(source)
+        latest = _codex_iso_timestamp(auth.get("last_refresh"))
+    except (OSError, ValueError, TypeError):
+        pass
+    if latest is None:
+        try:
+            latest = os.path.getmtime(auth_path)
+        except OSError:
+            pass
+    for path in _recent_codex_session_files(sessions_dir):
+        started = _codex_session_start(path)
+        if started is not None and (latest is None or started > latest):
+            latest = started
+    return latest
+
+
 def _last_codex_usage(path: str):
     """Read the latest complete rate-limit event from the tail of one session."""
     try:
@@ -701,10 +787,21 @@ def _last_codex_usage(path: str):
     return None
 
 
-def fetch_codex_account(as_of: str) -> dict:
-    """Read CODEX's most recent local five-hour and weekly rate-limit snapshot."""
-    base = {"key": "codex", "label": "CODEX", "storage_dir": None}
-    for path in _recent_codex_session_files(CODEX_SESSIONS_DIR):
+def fetch_codex_account(key: str, label: str, sessions_dir: str, as_of: str) -> dict:
+    """Read one Codex profile's most recent local rate-limit snapshot."""
+    last_used_at = _codex_activity_iso(_codex_profile_activity(sessions_dir))
+    base = {
+        "key": key,
+        "label": label,
+        "provider": "codex",
+        "is_active": False,
+        "last_used_at": last_used_at,
+        # This field is used only to identify Claude's active config directory.
+        # Keeping it null for Codex preserves the public JSON shape while the
+        # Swift reader uses `provider` to keep Codex rows out of that match.
+        "storage_dir": None,
+    }
+    for path in _recent_codex_session_files(sessions_dir):
         usage = _last_codex_usage(path)
         if usage is not None:
             return {**base, "status": "ok", "severity": "normal", "as_of": as_of, **usage}
@@ -757,6 +854,13 @@ def carry_forward(result: dict, store: dict) -> dict:
         return result
 
     carried = dict(previous)
+    # Keep the current account metadata even when only the numeric reading is
+    # carried forward. This lets new fields (such as the provider marker and a
+    # renamed display label) take effect immediately without waiting for a
+    # successful poll.
+    for field in ("key", "label", "provider", "storage_dir", "is_active", "last_used_at"):
+        if field in result:
+            carried[field] = result[field]
     carried["carried"] = True
     carried["degraded"] = result.get("status", "error")
     return carried
@@ -786,7 +890,8 @@ def _best_ok_account(accounts: list):
     for acct in accounts:
         # These top-level fields predate the account list and still drive the
         # Claude-only menu-bar fallback. CODEX must never become that fallback.
-        if acct.get("key") == "codex" or acct.get("status") != "ok":
+        if (acct.get("provider") == "codex" or acct.get("key") == "codex"
+                or acct.get("status") != "ok"):
             continue
         util = acct.get("five_hour", {}).get("utilization", float("inf"))
         if util < best_util:
@@ -803,12 +908,35 @@ def main() -> int:
     store = load_last_good()
 
     # One failure must never prevent the other accounts from being written.
-    # The Claude accounts come first by design; CODEX is the third, local source.
+    # The requested display order is stable: ADVO CLAUDE, PRINCE CLAUDE,
+    # ADVO CODEX, PRINCE CODEX.
     accounts = []
     for key, label, config_dir in ACCOUNTS:
         result = fetch_account(key, label, config_dir, as_of=fetched_at)
         accounts.append(carry_forward(result, store))
-    accounts.append(carry_forward(fetch_codex_account(as_of=fetched_at), store))
+    codex_results = []
+    for key, label, sessions_dir in CODEX_ACCOUNTS:
+        codex_results.append(fetch_codex_account(key, label, sessions_dir, as_of=fetched_at))
+
+    # There is no global Codex account flag when two CODEX_HOME roots exist.
+    # Mark the profile whose auth/session activity is newest; this mirrors the
+    # account most recently used to log in or start the Codex CLI.
+    def activity_value(result):
+        return _codex_iso_timestamp(result.get("last_used_at"))
+
+    active_codex = max(
+        codex_results,
+        key=lambda result: activity_value(result) if activity_value(result) is not None else float("-inf"),
+        default=None,
+    )
+    active_key = (
+        active_codex.get("key")
+        if active_codex is not None and activity_value(active_codex) is not None
+        else None
+    )
+    for result in codex_results:
+        result["is_active"] = result.get("key") == active_key
+        accounts.append(carry_forward(result, store))
 
     save_last_good(store, accounts)
 
