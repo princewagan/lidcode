@@ -33,7 +33,9 @@ natively every five minutes and with **⌘R**. Other AI tools can still use Lidc
 process watching and CLI work leases; this release's usage cards support Claude
 and Codex. AI profile configuration is stored in `~/.lidcode/ai-profiles.json`.
 
-<img src="docs/screenshots/dashboard-dark.png" alt="Lidcode provider dashboard with Claude, Codex and keep-awake controls" width="320"> <img src="docs/screenshots/settings-dark.png" alt="Settings with battery and temperature safety guards" width="320">
+| Dashboard | Customize | Settings |
+|---|---|---|
+| <img src="docs/screenshots/dashboard-dark.png" alt="Lidcode provider dashboard with Claude, Codex and keep-awake controls" width="240"> | <img src="docs/screenshots/customize-dark.png" alt="Customize screen with color, menu bar usage, AI profiles, and add-provider controls" width="240"> | <img src="docs/screenshots/settings-dark.png" alt="Settings with battery and temperature safety guards" width="240"> |
 
 ### Your agent is still working. You want to close the lid and go to bed.
 

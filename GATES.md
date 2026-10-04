@@ -31,7 +31,7 @@ Scope: Keep the current source and battery/temperature override UI intact, fix c
   EVIDENCE: exit=0; shell=/bin/sh; cwd=/Users/princewagan/lidcode; path=faf417a81eb0/54 entries; output=[7/8] Applying LidCodeApp | Build of product 'LidCodeApp' complete! (4.94s)
 
 - [x] G7: The tracked dashboard, profile editor, and settings screenshots match the reviewed fresh captures.
-  CHECK: cmp -s /tmp/lidcode-home-current-20261004/dashboard-dark.png docs/screenshots/dashboard-dark.png && cmp -s /tmp/lidcode-refresh-capture/dashboard-light.png docs/screenshots/dashboard-light.png && cmp -s /tmp/lidcode-refresh-capture/customize-dark.png docs/screenshots/customize-dark.png && cmp -s /tmp/lidcode-refresh-capture/settings-dark.png docs/screenshots/settings-dark.png && cmp -s /tmp/lidcode-refresh-capture/settings-light.png docs/screenshots/settings-light.png && echo "tracked screenshots match fresh SwiftUI renders"
+  CHECK: cmp -s /tmp/lidcode-home-current-20261004/dashboard-dark.png docs/screenshots/dashboard-dark.png && cmp -s /tmp/lidcode-refresh-capture/dashboard-light.png docs/screenshots/dashboard-light.png && cmp -s /tmp/lidcode-customize-current-20261004/customize-dark.png docs/screenshots/customize-dark.png && cmp -s /tmp/lidcode-refresh-capture/settings-dark.png docs/screenshots/settings-dark.png && cmp -s /tmp/lidcode-refresh-capture/settings-light.png docs/screenshots/settings-light.png && echo "tracked screenshots match fresh SwiftUI renders"
   EXPECT: tracked screenshots match fresh SwiftUI renders
   EVIDENCE: exit=0; shell=/bin/sh; cwd=/Users/princewagan/lidcode; path=faf417a81eb0/54 entries; output=tracked screenshots match fresh SwiftUI renders
 
